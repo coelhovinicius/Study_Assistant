@@ -1,0 +1,24 @@
+# Segredos — NUNCA commitar
+.streamlit/secrets.toml
+auth/users.yaml
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# SO / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Saídas geradas localmente (se algum dia forem escritas em disco)
+/output/
+/tmp/

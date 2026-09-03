@@ -1,0 +1,10 @@
+# Fallback local de credenciais — usado automaticamente quando
+# st.secrets["auth"] não está configurado (mesmo padrão dos seus outros
+# apps, via auth/auth_manager.py).
+#
+# Não edite este arquivo à mão com uma senha em texto puro: rode
+#   python scripts/create_admin_user.py
+# que gera o hash bcrypt e grava "auth/users.yaml" (sem o .example) pra
+# você. Esse arquivo real fica fora do Git (.gitignore).
+username: admin
+password_hash: "$2b$12$SUBSTITUA_PELO_HASH_GERADO_PELO_SCRIPT"

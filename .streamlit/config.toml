@@ -1,0 +1,11 @@
+# Tema visual do app (paleta "azul-petróleo + dourado" da imagem de
+# referência do usuário + "lápis-lazúli" para botões normais — ver
+# src/study_assistant/presentation/theme.py para a paleta completa e a
+# pintura dos outros tipos de botão via CSS, já que o Streamlit só permite
+# UMA cor primária nativa aqui).
+[theme]
+primaryColor = "#26619c"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#eef2f5"
+textColor = "#1c2b33"
+font = "sans serif"

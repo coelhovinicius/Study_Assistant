@@ -1,0 +1,30 @@
+# Interface
+streamlit>=1.38
+
+# Extração de texto
+pypdf>=4.3
+python-docx>=1.1
+
+# Geração de relatório
+reportlab>=4.2
+
+# Persistência (Turso via HTTP)
+requests>=2.32
+
+# Segurança
+bcrypt>=4.2
+pyyaml>=6.0  # fallback local de credenciais (auth/users.yaml), mesmo padrão dos outros apps
+
+# Fuso horário (exibição em horário de Brasília) — o Windows não vem com o
+# banco de fusos IANA que o 'zoneinfo' da stdlib precisa; no Linux/macOS
+# esse pacote é praticamente um no-op, mas sem ele o app quebra no Windows.
+tzdata>=2024.1
+
+# Provedores de IA (instale só os que você for realmente usar)
+openai>=1.40
+google-genai>=0.3
+groq>=0.9
+mistralai>=1.0
+
+# tomllib é nativo a partir do Python 3.11; para versões anteriores:
+tomli>=2.0; python_version < "3.11"
