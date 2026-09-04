@@ -15,8 +15,9 @@ from types import SimpleNamespace
 
 import streamlit as st
 
+from study_assistant.application.report_service import GeneratedReport
 from study_assistant.domain.entities import StudySession
-from study_assistant.domain.exceptions import RepositoryError
+from study_assistant.domain.exceptions import ReportGenerationError, RepositoryError
 from study_assistant.presentation.pages_ import history_page as page
 
 
@@ -95,17 +96,18 @@ def test_confirm_delete_dialog_com_erro_do_turso_nao_estoura_e_mantem_a_sessao(m
     assert st.session_state[page._VIEWING_KEY] == "abc123"
 
 
-# --- visualização: sessão salva só com PDF vs. sessão legada --------------
+# --- visualização: "Ver/baixar" só baixa, nunca renderiza -----------------
+#
+# Pedido explícito do usuário: em vez de mostrar o conteúdo da sessão na
+# tela (seções de análise, insights, múltiplos formatos de download),
+# "Ver/baixar" deve SÓ oferecer o PDF pra download — sem renderizar nada.
+# Isso vale tanto pra sessão salva depois da mudança pra guardar só o PDF
+# (usa o PDF já guardado) quanto pra uma sessão legada (gera o PDF na hora,
+# a partir dos materiais/análise que ainda existem pra ela, mas mesmo assim
+# só oferece o download).
 
 
-def test_ver_sessao_salva_so_com_pdf_mostra_botao_de_download_e_nao_chama_render_full_result(
-    monkeypatch,
-) -> None:
-    """Sessão salva DEPOIS da mudança pra guardar só o PDF: a tela não tem
-    materiais/análise pra mostrar (nem foram salvos) — só um botão pra
-    baixar o PDF que está guardado. Não pode cair em render_full_result
-    (que tentaria regenerar outros formatos a partir de dados que não
-    existem para essa sessão)."""
+def test_ver_sessao_salva_so_com_pdf_usa_o_pdf_guardado_direto(monkeypatch) -> None:
     saved_session = StudySession(
         id="abc123",
         title="Sessão X",
@@ -122,13 +124,15 @@ def test_ver_sessao_salva_so_com_pdf_mostra_botao_de_download_e_nao_chama_render
             assert session_id == "abc123"
             return saved_session
 
-    container = SimpleNamespace(history_service=_HistoryService())
+    report_use_case_calls = []
+    container = SimpleNamespace(
+        history_service=_HistoryService(),
+        report_use_case=SimpleNamespace(
+            execute=lambda *a, **k: report_use_case_calls.append((a, k)) or None
+        ),
+    )
     st.session_state[page._VIEWING_KEY] = "abc123"
 
-    render_full_result_calls = []
-    monkeypatch.setattr(
-        page, "render_full_result", lambda *args, **kwargs: render_full_result_calls.append((args, kwargs))
-    )
     download_button_calls = []
     monkeypatch.setattr(
         st, "download_button", lambda *args, **kwargs: download_button_calls.append(kwargs) or False
@@ -136,17 +140,18 @@ def test_ver_sessao_salva_so_com_pdf_mostra_botao_de_download_e_nao_chama_render
 
     page.render_history_page(container)
 
-    assert render_full_result_calls == []
+    assert report_use_case_calls == []  # PDF já guardado — não gera de novo
     assert len(download_button_calls) == 1
     assert download_button_calls[0]["data"] == b"%PDF-conteudo-fake"
     assert download_button_calls[0]["file_name"] == "sessao_x.pdf"
     assert download_button_calls[0]["mime"] == "application/pdf"
 
 
-def test_ver_sessao_legada_sem_pdf_armazenado_cai_no_render_full_result(monkeypatch) -> None:
+def test_ver_sessao_legada_gera_pdf_na_hora_e_so_oferece_download(monkeypatch) -> None:
     """Sessão salva ANTES da mudança (sem stored_pdf_bytes, mas com
-    materiais/análise reconstruídos por get()): continua mostrando tudo na
-    tela do jeito que sempre funcionou."""
+    materiais/análise reconstruídos por get()): o PDF é gerado na hora
+    (reaproveitando report_use_case), mas a tela não renderiza nada — só o
+    botão de baixar esse PDF recém-gerado."""
     legacy_session = StudySession(id="legado-1", title="Sessão Antiga", materials=[])
 
     class _HistoryService:
@@ -156,17 +161,55 @@ def test_ver_sessao_legada_sem_pdf_armazenado_cai_no_render_full_result(monkeypa
         def get(self, session_id):
             return legacy_session
 
-    container = SimpleNamespace(history_service=_HistoryService())
+    execute_calls = []
+
+    def _fake_execute(session, fmt):
+        execute_calls.append((session, fmt))
+        return GeneratedReport(content=b"%PDF-gerado-na-hora", filename="sessao_antiga.pdf", mime_type="application/pdf")
+
+    container = SimpleNamespace(
+        history_service=_HistoryService(),
+        report_use_case=SimpleNamespace(execute=_fake_execute),
+    )
     st.session_state[page._VIEWING_KEY] = "legado-1"
 
-    render_full_result_calls = []
+    download_button_calls = []
     monkeypatch.setattr(
-        page, "render_full_result", lambda *args, **kwargs: render_full_result_calls.append((args, kwargs))
+        st, "download_button", lambda *args, **kwargs: download_button_calls.append(kwargs) or False
     )
 
     page.render_history_page(container)
 
-    assert len(render_full_result_calls) == 1
-    args, kwargs = render_full_result_calls[0]
-    assert args[1] is legacy_session
-    assert kwargs["key_prefix"] == "hist_legado-1"
+    assert execute_calls == [(legacy_session, "pdf")]
+    assert len(download_button_calls) == 1
+    assert download_button_calls[0]["data"] == b"%PDF-gerado-na-hora"
+    assert download_button_calls[0]["file_name"] == "sessao_antiga.pdf"
+
+
+def test_ver_sessao_legada_com_erro_ao_gerar_pdf_mostra_erro_sem_quebrar(monkeypatch) -> None:
+    legacy_session = StudySession(id="legado-1", title="Sessão Antiga", materials=[])
+
+    class _HistoryService:
+        def list_summaries(self):
+            return [{"id": "legado-1", "title": "Sessão Antiga", "created_at": None}]
+
+        def get(self, session_id):
+            return legacy_session
+
+    def _broken_execute(session, fmt):
+        raise ReportGenerationError("reportlab não instalado")
+
+    container = SimpleNamespace(
+        history_service=_HistoryService(),
+        report_use_case=SimpleNamespace(execute=_broken_execute),
+    )
+    st.session_state[page._VIEWING_KEY] = "legado-1"
+
+    download_button_calls = []
+    monkeypatch.setattr(
+        st, "download_button", lambda *args, **kwargs: download_button_calls.append(kwargs) or False
+    )
+
+    page.render_history_page(container)  # não pode levantar
+
+    assert download_button_calls == []

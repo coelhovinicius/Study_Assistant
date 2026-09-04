@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import streamlit as st
 
-from study_assistant.domain.exceptions import RepositoryError
+from study_assistant.domain.exceptions import ReportGenerationError, RepositoryError
 from study_assistant.infrastructure.persistence.datetime_utils import from_iso
-from study_assistant.presentation.components import render_full_result
 from study_assistant.presentation.di_container import AppContainer
 from study_assistant.presentation.theme import themed_button
 from study_assistant.shared.timezone_format import format_brasilia
@@ -26,14 +25,18 @@ def _confirm_delete_dialog(container: AppContainer, *, session_id: str, title: s
     confirm_col, cancel_col = st.columns(2)
     with confirm_col:
         if themed_button("🗑️ Confirmar", variant="delete", use_container_width=True):
-            try:
-                container.history_service.delete(session_id)
-            except RepositoryError as exc:
-                _show_repository_error("Não foi possível excluir essa sessão agora.", exc)
-            else:
-                if st.session_state.get(_VIEWING_KEY) == session_id:
-                    st.session_state.pop(_VIEWING_KEY, None)
-                st.rerun()
+            # st.spinner mostra feedback DURANTE a chamada (mesmo sem rerun
+            # — é o que faz o clique não parecer travado enquanto espera o
+            # Turso responder, principalmente quando isso demora).
+            with st.spinner("Excluindo..."):
+                try:
+                    container.history_service.delete(session_id)
+                except RepositoryError as exc:
+                    _show_repository_error("Não foi possível excluir essa sessão agora.", exc)
+                else:
+                    if st.session_state.get(_VIEWING_KEY) == session_id:
+                        st.session_state.pop(_VIEWING_KEY, None)
+                    st.rerun()
     with cancel_col:
         if st.button("Cancelar", use_container_width=True):
             st.rerun()
@@ -93,20 +96,35 @@ def render_history_page(container: AppContainer) -> None:
     st.divider()
     st.subheader(f"📄 {session.title}")
 
+    # Pedido explícito do usuário: "Ver/baixar" não é mais pra RENDERIZAR
+    # nada na tela — é só pra disponibilizar o PDF pra download. Nada de
+    # expanders com as seções da análise, nem botões de outros formatos.
     if session.stored_pdf_bytes:
-        # Sessão salva DEPOIS da mudança pra guardar só o PDF: não tem
-        # materiais/análise pra mostrar na tela nem pra regenerar em outros
-        # formatos — só o PDF que foi guardado, pronto pra baixar.
-        st.download_button(
-            "📄 Baixar PDF",
-            data=session.stored_pdf_bytes,
-            file_name=session.stored_pdf_filename or f"{session.title}.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-            key=f"hist_{session.id}_download_pdf",
-        )
+        # Sessão salva DEPOIS da mudança pra guardar só o PDF: o PDF já
+        # está pronto, guardado — usa direto, sem gerar nada de novo.
+        pdf_bytes = session.stored_pdf_bytes
+        pdf_filename = session.stored_pdf_filename or f"{session.title}.pdf"
     else:
-        # Legado: sessão salva ANTES da mudança, ainda com materiais/análise
-        # completos — continua mostrando tudo na tela e oferecendo os
-        # outros formatos, como sempre funcionou.
-        render_full_result(container, session, key_prefix=f"hist_{session.id}")
+        # Legado: sessão salva ANTES da mudança, sem PDF guardado — os
+        # materiais/análise ainda existem pra ela (reconstruídos por
+        # history_service.get()), então o PDF é gerado na hora, uma vez,
+        # só pra virar o download. Mesmo assim NÃO renderiza as seções na
+        # tela — só o botão de baixar.
+        try:
+            report = container.report_use_case.execute(session, "pdf")
+        except ReportGenerationError as exc:
+            st.error("Não foi possível gerar o PDF dessa sessão agora.")
+            with st.expander("Detalhes técnicos"):
+                st.code(str(exc))
+            return
+        pdf_bytes = report.content
+        pdf_filename = report.filename
+
+    st.download_button(
+        "📄 Baixar PDF",
+        data=pdf_bytes,
+        file_name=pdf_filename,
+        mime="application/pdf",
+        use_container_width=True,
+        key=f"hist_{session.id}_download_pdf",
+    )

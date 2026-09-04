@@ -7,6 +7,7 @@ funciona normalmente sem nunca gravar nada aqui, se o usuário preferir.
 
 from __future__ import annotations
 
+import gzip
 import json
 
 from study_assistant.domain.entities import (
@@ -48,6 +49,35 @@ def _insights_to_json(insights: ApostilaInsights | None) -> str | None:
         },
         ensure_ascii=False,
     )
+
+
+_GZIP_MAGIC = b"\x1f\x8b"
+
+
+def _compress_pdf(pdf_bytes: bytes) -> bytes:
+    # Achado real investigando sessões que salvavam mas não abriam: o valor
+    # blob chegava TRUNCADO na volta (base64 sem padding correto, mas
+    # começando com o cabeçalho certo de um PDF de verdade — ou seja, algo
+    # no caminho cortando a resposta, não um bug de codificação). Comprimir
+    # aqui reduz o que precisa sobreviver a essa viagem inteira — testado
+    # com um PDF real gerado por este app: ~45-50% menor o base64 que
+    # trafega. Não é garantia de resolver (se a causa não for ligada a
+    # tamanho, comprimir não muda nada), mas não tem como piorar, e dá uma
+    # chance real de escapar de algum limite de tamanho no meio do caminho.
+    return gzip.compress(pdf_bytes, compresslevel=6)
+
+
+def _decompress_pdf(stored: bytes) -> bytes:
+    # Compatível com as sessões já salvas ANTES dessa mudança (sem gzip):
+    # só tenta descomprimir se os bytes realmente começam com a assinatura
+    # gzip; qualquer coisa diferente disso (ou uma descompressão que falha)
+    # é tratada como um PDF cru mesmo, sem quebrar a leitura.
+    if stored[:2] == _GZIP_MAGIC:
+        try:
+            return gzip.decompress(stored)
+        except OSError:
+            pass
+    return stored
 
 
 def _insights_from_json(raw: str | None) -> ApostilaInsights | None:
@@ -94,7 +124,7 @@ class TursoSessionRepository(SessionRepository):
                 session.id,
                 session.title,
                 to_iso(session.created_at),
-                pdf_bytes,
+                _compress_pdf(pdf_bytes),
                 pdf_filename,
             ],
         )
@@ -142,7 +172,7 @@ class TursoSessionRepository(SessionRepository):
                 materials=[],
                 created_at=from_iso(row["created_at"]),  # type: ignore[arg-type]
                 saved=True,
-                stored_pdf_bytes=pdf_bytes,
+                stored_pdf_bytes=_decompress_pdf(pdf_bytes),
                 stored_pdf_filename=row.get("pdf_filename") or f"{row['title']}.pdf",
             )
 
