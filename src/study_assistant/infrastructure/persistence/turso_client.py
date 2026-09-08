@@ -38,29 +38,36 @@ from study_assistant.domain.exceptions import RepositoryError
 
 logger = logging.getLogger(__name__)
 
-# Quantas vezes tentar de novo o pipeline INTEIRO (não só reprocessar a
-# resposta) quando um valor blob vem truncado — visto em produção: um PDF
-# guardado no histórico, o começo do valor batendo perfeitamente com um PDF
-# de verdade (cabeçalho "%PDF-1.4" reconhecível em base64), mas faltando o
-# padding correto no final — ou seja, cortado no meio do caminho, não mal
-# codificado (a codificação já foi conferida contra a documentação oficial
-# e testada). A causa mais provável é alguma coisa na rede entre este
-# processo e o Turso (proxy/antivírus corporativo cortando respostas
-# grandes, por exemplo) — não o Turso guardando errado nem este cliente
-# codificando errado. Repetir o request inteiro dá chance de vir uma
-# resposta íntegra se a causa for intermitente; se for determinística, as
-# tentativas falham do mesmo jeito e o erro final continua com o mesmo
-# diagnóstico (tamanho + prefixo) de antes.
+# Quantas vezes tentar de novo o pipeline INTEIRO se um blob vier com um
+# comprimento que nem _pad_base64 consegue corrigir (módulo 4 igual a 1 —
+# ver _pad_base64). ATUALIZAÇÃO depois de investigar a fundo com
+# scripts/diagnosticar_leitura_pdf.py contra o banco de produção: a causa
+# do "blob truncado" NUNCA foi rede/proxy/antivírus cortando a resposta —
+# era o Turso devolvendo o base64 sem o padding final (redundante por
+# natureza, dá pra calcular quantos "=" faltam só pelo tamanho da string),
+# e base64.b64decode do Python sendo estrito quanto a isso. Confirmado com
+# 7 de 7 valores reais observados (tamanhos bem diferentes) tendo
+# comprimento módulo 4 igual a 2 ou 3 — exatamente os dois únicos restos
+# possíveis quando falta padding, nunca o resto 1 que uma corrupção de
+# verdade (aleatória) produziria com chance razoável. Isso já é corrigido
+# direto no decode (_pad_base64), sem precisar de nova tentativa nenhuma —
+# esta constante e a nova tentativa abaixo ficam só como rede de segurança
+# pro caso raro (zero instâncias confirmadas até agora) de uma corrupção
+# de verdade, não relacionada a padding.
 _MAX_BLOB_RETRIES = 2
 
 
 class _BlobDecodeError(Exception):
     """Sinal interno (de propósito NÃO é RepositoryError): um valor blob
-    veio truncado/malformado numa resposta do Turso. ``execute_batch`` usa
-    isso pra saber que vale tentar o pipeline de novo antes de desistir —
-    ao contrário de um erro de SQL de verdade (ex: violação de UNIQUE),
-    que repetir não muda nada. Nunca escapa deste módulo: ou uma tentativa
-    seguinte decodifica direito, ou vira RepositoryError no final."""
+    veio com comprimento módulo 4 igual a 1 depois de tentar completar o
+    padding — o único caso em que _pad_base64 não sabe o que fazer, porque
+    não existe base64 válido (com ou sem padding) nesse formato. Na
+    prática, quase todo "blob truncado" real era só falta de padding
+    (corrigida antes de chegar aqui, ver _pad_base64) — isto agora cobre
+    só a sobra: uma corrupção de verdade. ``execute_batch`` tenta o
+    pipeline de novo antes de desistir, como rede de segurança pra esse
+    caso raro. Nunca escapa deste módulo: ou uma tentativa seguinte
+    decodifica direito, ou vira RepositoryError no final."""
 
 
 @dataclass
@@ -98,6 +105,35 @@ def _to_turso_arg(value: Any) -> dict[str, Any]:
     return {"type": "text", "value": str(value)}
 
 
+def _pad_base64(encoded: str) -> str:
+    """Repõe o padding final ('=' / '==') que o Turso, na prática, às vezes
+    NÃO manda de volta — confirmado rodando scripts/diagnosticar_leitura_pdf.py
+    contra o banco de verdade: um blob de 100 bytes ALEATÓRIOS (nada de PDF,
+    nada de rede corporativa envolvida na explicação) voltou com exatamente
+    134 caracteres, e 134 é EXATAMENTE o comprimento de 100 bytes em base64
+    SEM os 2 caracteres de padding finais (136 - 2 = 134). Os outros casos
+    reais que já tinham aparecido (28875, 24254, 33074, 1334 e 6667
+    caracteres) também batem: todos com comprimento módulo 4 igual a 2 ou 3
+    — exatamente os dois únicos restos possíveis quando falta padding
+    (nunca resto 1, que seria impossível pra um base64 válido, com ou sem
+    padding). Ou seja: os dados nunca estiveram truncados/cortados — só
+    faltava o padding, que é puramente redundante (dá pra calcular quantos
+    "=" faltam só pelo tamanho da string) e o base64.b64decode do Python é
+    estrito quanto a isso.
+
+    Resto 1 (mod 4) é o único caso em que NÃO dá pra saber quanto
+    completar — não é um "falta padding", é uma string que não pode ser
+    base64 válido de jeito nenhum (nem com nem sem padding). Nesse caso não
+    mexe: deixa cair no decode original e virar o erro de sempre, em vez de
+    arriscar completar errado e decodificar silenciosamente pra bytes
+    incorretos.
+    """
+    remainder = len(encoded) % 4
+    if remainder in (2, 3):
+        return encoded + "=" * (4 - remainder)
+    return encoded
+
+
 def _from_turso_cell(cell: dict[str, Any]) -> Any:
     """Converte uma célula retornada pelo Turso de volta para um valor Python."""
     cell_type = cell.get("type")
@@ -110,7 +146,7 @@ def _from_turso_cell(cell: dict[str, Any]) -> Any:
         if encoded is None:
             return None
         try:
-            return base64.b64decode(encoded)
+            return base64.b64decode(_pad_base64(encoded))
         except (binascii.Error, ValueError) as exc:
             # NUNCA deixa um valor blob malformado derrubar a página inteira
             # (era exatamente isso que acontecia antes: binascii.Error sem
@@ -177,10 +213,13 @@ class TursoHttpClient:
         que chamar ``execute`` várias vezes em sequência; a diferença é só
         que tudo trafega num request HTTP só, em vez de um por instrução).
 
-        Se um valor blob vier truncado na resposta, o pipeline INTEIRO é
-        tentado de novo (até ``_MAX_BLOB_RETRIES`` vezes extras, com uma
-        pausa curta entre tentativas) antes de desistir — ver comentário em
-        ``_MAX_BLOB_RETRIES`` sobre por quê.
+        Se um valor blob vier com padding faltando, isso já é corrigido
+        direto no decode (ver ``_pad_base64``) — nenhuma nova tentativa
+        acontece pra esse caso, que é o comum. Só se sobrar um comprimento
+        que nem isso resolve (``_BlobDecodeError``, ver esse comentário) o
+        pipeline INTEIRO é tentado de novo (até ``_MAX_BLOB_RETRIES`` vezes
+        extras) antes de desistir, como rede de segurança pra uma
+        corrupção de verdade.
         """
         if not statements:
             return []
@@ -201,8 +240,9 @@ class TursoHttpClient:
         for attempt in range(_MAX_BLOB_RETRIES + 1):
             if attempt > 0:
                 logger.warning(
-                    "Valor blob truncado na resposta do Turso, tentando de novo "
-                    "(tentativa %d de %d)...",
+                    "Valor blob com comprimento inválido mesmo depois de completar "
+                    "o padding (possível corrupção de verdade, não o caso comum de "
+                    "padding faltando) — tentando de novo (tentativa %d de %d)...",
                     attempt + 1,
                     _MAX_BLOB_RETRIES + 1,
                 )

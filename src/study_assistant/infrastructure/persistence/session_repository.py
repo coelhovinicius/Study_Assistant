@@ -55,15 +55,14 @@ _GZIP_MAGIC = b"\x1f\x8b"
 
 
 def _compress_pdf(pdf_bytes: bytes) -> bytes:
-    # Achado real investigando sessões que salvavam mas não abriam: o valor
-    # blob chegava TRUNCADO na volta (base64 sem padding correto, mas
-    # começando com o cabeçalho certo de um PDF de verdade — ou seja, algo
-    # no caminho cortando a resposta, não um bug de codificação). Comprimir
-    # aqui reduz o que precisa sobreviver a essa viagem inteira — testado
-    # com um PDF real gerado por este app: ~45-50% menor o base64 que
-    # trafega. Não é garantia de resolver (se a causa não for ligada a
-    # tamanho, comprimir não muda nada), mas não tem como piorar, e dá uma
-    # chance real de escapar de algum limite de tamanho no meio do caminho.
+    # A causa real do "Ver/baixar" falhando com blob truncado (investigada
+    # a fundo com scripts/diagnosticar_leitura_pdf.py) não era tamanho —
+    # era o Turso devolvendo o base64 sem o padding final, já corrigido
+    # direto em turso_client.py (_pad_base64). Compressão não resolvia
+    # aquilo (aliás continuou falhando depois dela ter sido adicionada) e
+    # continua aqui só pelo motivo original, independente do bug: reduzir
+    # o volume de dados que trafega e fica guardado — testado com um PDF
+    # real gerado por este app: ~45-50% menor.
     return gzip.compress(pdf_bytes, compresslevel=6)
 
 
