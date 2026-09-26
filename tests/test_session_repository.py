@@ -14,6 +14,7 @@ tem os dois caminhos: PDF armazenado -> devolve direto; sem PDF armazenado
 
 from __future__ import annotations
 
+import gzip
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -99,13 +100,11 @@ def test_save_grava_so_id_titulo_data_e_pdf_numa_unica_instrucao() -> None:
     assert len(client.calls) == 1  # UMA instrução só — nada de materiais/tentativas
     sql, params = client.calls[0]
     assert sql.startswith("INSERT INTO sa_study_sessions")
-    assert params == (
-        session.id,
-        session.title,
-        session.created_at.isoformat(),
-        b"%PDF-conteudo-fake",
-        "sessao_de_teste.pdf",
-    )
+    assert params[:3] == (session.id, session.title, session.created_at.isoformat())
+    # O PDF vai comprimido com gzip (ver _compress_pdf) — o que importa é
+    # que descomprimido ele volte exatamente igual ao recebido.
+    assert gzip.decompress(params[3]) == b"%PDF-conteudo-fake"
+    assert params[4] == "sessao_de_teste.pdf"
 
 
 def test_save_nao_grava_nada_em_materiais_nem_em_tentativas() -> None:
@@ -133,7 +132,7 @@ def test_save_duas_vezes_atualiza_em_vez_de_duplicar() -> None:
 
     assert len(client.calls) == 2
     assert "ON CONFLICT(id) DO UPDATE" in client.calls[0][0]
-    assert client.calls[1][1][3] == b"versao-2"  # pdf_bytes da segunda chamada
+    assert gzip.decompress(client.calls[1][1][3]) == b"versao-2"  # pdf_bytes da segunda chamada
 
 
 def test_rename_atualiza_titulo_e_nome_do_pdf_numa_unica_instrucao() -> None:
