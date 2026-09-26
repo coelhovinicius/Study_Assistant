@@ -4,8 +4,6 @@ de IA e download do relatório final (itens 7 a 10 do fluxo do usuário).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 import streamlit as st
 
 from study_assistant.application.document_service import UploadedFile
@@ -19,7 +17,6 @@ from study_assistant.domain.exceptions import (
 from study_assistant.presentation.components import render_full_result
 from study_assistant.presentation.di_container import AppContainer
 from study_assistant.presentation.theme import render_unsaved_changes_guard, themed_button
-from study_assistant.shared.timezone_format import format_brasilia
 
 _ACCEPTED_TYPES = ["pdf", "txt", "docx"]
 _SESSION_STATE_KEY = "current_study_session"
@@ -53,12 +50,17 @@ def has_unsaved_analysis() -> bool:
     return session is not None and not session.saved
 
 
-def _default_session_title() -> str:
-    """Título usado quando o usuário não digita um. Precisa formatar o
-    horário no fuso de Brasília (``format_brasilia``, o mesmo usado no
-    "Gerado em" do relatório) — não em UTC cru, senão o título mostra um
-    horário 3h adiantado em relação ao resto da sessão."""
-    return f"Sessão de estudo — {format_brasilia(datetime.now(timezone.utc))}"
+def _missing_for_analysis(title: str, apostila_files) -> list[str]:
+    """O que ainda falta pra liberar "Analisar materiais". O título é
+    obrigatório (pedido do usuário) — antes, sem título, a sessão ganhava
+    um genérico "Sessão de estudo — <data>", difícil de achar depois no
+    histórico."""
+    missing = []
+    if not title.strip():
+        missing.append("preencha o título da sessão")
+    if not apostila_files:
+        missing.append("envie ao menos um arquivo de Apostila")
+    return missing
 
 
 def _uploader_version() -> int:
@@ -132,9 +134,10 @@ def render_upload_analysis_page(container: AppContainer) -> None:
 
     st.header("📚 Nova análise de estudo")
     st.caption(
-        "Suba os materiais desta matéria/aula. A apostila é obrigatória "
-        "(é dela que as referências, dicas e o desafio são extraídos); "
-        "os demais são opcionais."
+        "Dê um título à sessão e suba os materiais desta matéria/aula. O "
+        "título e a apostila são obrigatórios (é da apostila que as "
+        "referências, dicas e o desafio são extraídos); os demais são "
+        "opcionais."
     )
 
     _, new_analysis_col = st.columns([4, 1])
@@ -189,9 +192,10 @@ def render_upload_analysis_page(container: AppContainer) -> None:
             disabled=is_busy,
         )
 
-    can_analyze = bool(apostila_files)
+    missing = _missing_for_analysis(title, apostila_files)
+    can_analyze = not missing
     if not is_analyzing and not can_analyze:
-        st.info("Envie ao menos um arquivo de Apostila para habilitar a análise.")
+        st.info(f"Para habilitar a análise, {' e '.join(missing)}.")
 
     analyze_clicked = st.button(
         "⏳ Analisando..." if is_analyzing else "🚀 Analisar materiais",
@@ -214,7 +218,7 @@ def render_upload_analysis_page(container: AppContainer) -> None:
     if is_analyzing:
         _run_analysis(
             container,
-            title=title.strip() or _default_session_title(),
+            title=title.strip(),
             apostila_files=apostila_files,
             livro_files=livro_files,
             podcast_files=podcast_files,

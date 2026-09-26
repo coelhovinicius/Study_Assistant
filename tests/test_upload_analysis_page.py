@@ -28,7 +28,6 @@ quando a chamada de verdade começa.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -41,7 +40,6 @@ from study_assistant.domain.exceptions import (
     RepositoryError,
 )
 from study_assistant.presentation.pages_ import upload_analysis_page as page
-from study_assistant.shared.timezone_format import format_brasilia
 
 
 def setup_function() -> None:
@@ -51,29 +49,62 @@ def setup_function() -> None:
     st.session_state.clear()
 
 
-# --- título padrão da sessão (quando o usuário não digita um) ------------
+# --- título obrigatório pra liberar "Analisar materiais" -----------------
 
 
-def test_default_session_title_usa_horario_de_brasilia_nao_utc_cru(monkeypatch) -> None:
-    """Regressão: o título padrão ("Sessão de estudo — dd/mm/aaaa hh:mm")
-    formatava ``datetime.now(timezone.utc)`` DIRETO, sem converter pro fuso
-    de Brasília — resultando num horário 3h ADIANTADO em relação ao "Gerado
-    em" do relatório final (que já usava ``format_brasilia``). O título e o
-    relatório precisam mostrar o MESMO horário de parede."""
-    fixed_utc = datetime(2026, 9, 3, 0, 36, tzinfo=timezone.utc)
+def _render_form(monkeypatch, *, title: str, apostila_files: list) -> dict:
+    """Renderiza a página em bare mode com o título e a apostila dados, e
+    devolve o que interessa: os kwargs do botão "Analisar materiais" e os
+    avisos st.info exibidos."""
+    captured = {"analyze_button": None, "infos": []}
 
-    class _FixedDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return fixed_utc
+    def _button(label, *args, **kwargs):
+        if kwargs.get("key") == "btn_analyze":
+            captured["analyze_button"] = kwargs
+        return False
 
-    monkeypatch.setattr(page, "datetime", _FixedDatetime)
+    monkeypatch.setattr(st, "text_input", lambda *a, **k: title)
+    monkeypatch.setattr(
+        st,
+        "file_uploader",
+        lambda label, *a, **k: apostila_files if k["key"].startswith("uploader_apostila_") else [],
+    )
+    monkeypatch.setattr(st, "button", _button)
+    monkeypatch.setattr(st, "info", lambda text, *a, **k: captured["infos"].append(text))
+    monkeypatch.setattr(page, "render_unsaved_changes_guard", lambda **kwargs: None)
 
-    title = page._default_session_title()
+    page.render_upload_analysis_page(SimpleNamespace())
+    return captured
 
-    assert title == f"Sessão de estudo — {format_brasilia(fixed_utc)}"
-    assert "02/09/2026 21:36" in title  # Brasília = UTC-3
-    assert "03/09/2026 00:36" not in title  # não pode sobrar o horário UTC cru
+
+@pytest.mark.parametrize("title", ["", "   "])
+def test_analisar_fica_desabilitado_sem_titulo_mesmo_com_apostila(monkeypatch, title) -> None:
+    captured = _render_form(monkeypatch, title=title, apostila_files=["apostila.pdf"])
+
+    assert captured["analyze_button"]["disabled"] is True
+    assert captured["infos"] == ["Para habilitar a análise, preencha o título da sessão."]
+
+
+def test_analisar_fica_desabilitado_sem_apostila_mesmo_com_titulo(monkeypatch) -> None:
+    captured = _render_form(monkeypatch, title="Direito Constitucional", apostila_files=[])
+
+    assert captured["analyze_button"]["disabled"] is True
+    assert captured["infos"] == ["Para habilitar a análise, envie ao menos um arquivo de Apostila."]
+
+
+def test_aviso_lista_titulo_e_apostila_quando_faltam_os_dois(monkeypatch) -> None:
+    captured = _render_form(monkeypatch, title="", apostila_files=[])
+
+    assert captured["infos"] == [
+        "Para habilitar a análise, preencha o título da sessão e envie ao menos um arquivo de Apostila."
+    ]
+
+
+def test_analisar_habilitado_com_titulo_e_apostila(monkeypatch) -> None:
+    captured = _render_form(monkeypatch, title="Direito Constitucional", apostila_files=["apostila.pdf"])
+
+    assert captured["analyze_button"]["disabled"] is False
+    assert captured["infos"] == []
 
 
 # --- versionamento dos widgets de upload ----------------------------------
