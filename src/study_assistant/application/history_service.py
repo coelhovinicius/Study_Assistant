@@ -7,7 +7,7 @@ nada.
 
 from __future__ import annotations
 
-from study_assistant.application.report_service import GenerateReportUseCase
+from study_assistant.application.report_service import GenerateReportUseCase, report_filename
 from study_assistant.domain.entities import StudySession
 from study_assistant.domain.ports import SessionRepository
 
@@ -36,6 +36,19 @@ class HistoryService:
 
     def get(self, session_id: str) -> StudySession | None:
         return self._session_repository.get(session_id)
+
+    def rename(self, session_id: str, new_title: str) -> str:
+        # O PDF guardado NÃO é regerado — o histórico não guarda mais os
+        # materiais nem a análise que seriam necessários pra isso. Então o
+        # título impresso dentro do PDF continua o antigo; mudam o título
+        # da lista e o nome do arquivo baixado.
+        title = new_title.strip()
+        if not title:
+            raise ValueError("O título da sessão não pode ficar vazio.")
+        self._session_repository.rename(
+            session_id, title=title, pdf_filename=report_filename(title, "pdf")
+        )
+        return title
 
     def delete(self, session_id: str) -> None:
         self._session_repository.delete(session_id)

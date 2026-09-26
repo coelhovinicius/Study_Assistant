@@ -59,6 +59,7 @@ class _RecordingRepository:
     banco nenhum por trás."""
 
     saved_calls: list[dict[str, Any]] = field(default_factory=list)
+    renamed_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def save(self, session, *, pdf_bytes, pdf_filename) -> None:
         self.saved_calls.append({"session": session, "pdf_bytes": pdf_bytes, "pdf_filename": pdf_filename})
@@ -68,6 +69,9 @@ class _RecordingRepository:
 
     def get(self, session_id: str):
         return None
+
+    def rename(self, session_id: str, *, title: str, pdf_filename: str) -> None:
+        self.renamed_calls.append({"session_id": session_id, "title": title, "pdf_filename": pdf_filename})
 
     def delete(self, session_id: str) -> None:
         pass
@@ -115,3 +119,25 @@ def test_save_propaga_erro_de_geracao_do_pdf_sem_chamar_o_repositorio() -> None:
 
     assert repo.saved_calls == []
     assert session.saved is False
+
+
+def test_rename_tira_espacos_e_atualiza_o_nome_do_pdf_junto() -> None:
+    repo = _RecordingRepository()
+    service = HistoryService(repo, GenerateReportUseCase([_FakePdfGenerator()]))
+
+    result = service.rename("abc123", "  Cálculo I — Unidade 2  ")
+
+    assert result == "Cálculo I — Unidade 2"
+    assert repo.renamed_calls == [
+        {"session_id": "abc123", "title": "Cálculo I — Unidade 2", "pdf_filename": "calculo_i_unidade_2.pdf"}
+    ]
+
+
+def test_rename_com_titulo_vazio_nao_chama_o_repositorio() -> None:
+    repo = _RecordingRepository()
+    service = HistoryService(repo, GenerateReportUseCase([_FakePdfGenerator()]))
+
+    with pytest.raises(ValueError):
+        service.rename("abc123", "   ")
+
+    assert repo.renamed_calls == []

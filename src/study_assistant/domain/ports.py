@@ -113,6 +113,11 @@ class SessionRepository(ABC):
         reconstruída a partir de materiais + análise, como sempre foi."""
 
     @abstractmethod
+    def rename(self, session_id: str, *, title: str, pdf_filename: str) -> None:
+        """Troca o título da sessão e o nome do arquivo do PDF guardado (pra
+        o download acompanhar o título novo). O conteúdo do PDF não muda."""
+
+    @abstractmethod
     def delete(self, session_id: str) -> None: ...
 
 

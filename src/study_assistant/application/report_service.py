@@ -18,6 +18,12 @@ def _slugify(text: str) -> str:
     return slug or "relatorio_de_estudo"
 
 
+def report_filename(title: str, format_name: str) -> str:
+    """Nome do arquivo de download — também usado por HistoryService.rename()
+    pra manter o nome do PDF guardado em sincronia com o título novo."""
+    return f"{_slugify(title)}.{format_name}"
+
+
 @dataclass(frozen=True)
 class GeneratedReport:
     content: bytes
@@ -42,5 +48,5 @@ class GenerateReportUseCase:
             )
 
         content = generator.generate(session)
-        filename = f"{_slugify(session.title)}.{generator.format_name}"
+        filename = report_filename(session.title, generator.format_name)
         return GeneratedReport(content=content, filename=filename, mime_type=generator.mime_type)

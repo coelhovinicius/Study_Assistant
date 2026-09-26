@@ -136,6 +136,20 @@ def test_save_duas_vezes_atualiza_em_vez_de_duplicar() -> None:
     assert client.calls[1][1][3] == b"versao-2"  # pdf_bytes da segunda chamada
 
 
+def test_rename_atualiza_titulo_e_nome_do_pdf_numa_unica_instrucao() -> None:
+    client = _RecordingTursoClient()
+    repo = TursoSessionRepository(client)
+
+    repo.rename("sessao-123", title="Título novo", pdf_filename="titulo_novo.pdf")
+
+    assert client.calls == [
+        (
+            "UPDATE sa_study_sessions SET title = ?, pdf_filename = ? WHERE id = ?",
+            ("Título novo", "titulo_novo.pdf", "sessao-123"),
+        )
+    ]
+
+
 def test_delete_remove_tentativas_junto_com_sessao_e_materiais() -> None:
     client = _RecordingTursoClient()
     repo = TursoSessionRepository(client)

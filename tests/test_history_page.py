@@ -213,3 +213,118 @@ def test_ver_sessao_legada_com_erro_ao_gerar_pdf_mostra_erro_sem_quebrar(monkeyp
     page.render_history_page(container)  # não pode levantar
 
     assert download_button_calls == []
+
+
+def test_baixar_pdf_aparece_dentro_do_card_escolhido_e_nao_no_fim_da_pagina(monkeypatch) -> None:
+    """Pedido do usuário: o botão de baixar ficava no fim da página, depois
+    de TODOS os cards — pra baixar um item do topo era preciso rolar a
+    lista inteira. Agora ele sai logo abaixo do item escolhido, antes do
+    card seguinte."""
+    summaries = [
+        {"id": "s1", "title": "Primeira", "created_at": None},
+        {"id": "s2", "title": "Segunda", "created_at": None},
+        {"id": "s3", "title": "Terceira", "created_at": None},
+    ]
+
+    class _HistoryService:
+        def list_summaries(self):
+            return summaries
+
+        def get(self, session_id):
+            return StudySession(
+                id=session_id,
+                title="Segunda",
+                materials=[],
+                stored_pdf_bytes=b"%PDF-fake",
+                stored_pdf_filename="segunda.pdf",
+            )
+
+    container = SimpleNamespace(history_service=_HistoryService())
+    st.session_state[page._VIEWING_KEY] = "s2"
+
+    rendered = []
+    monkeypatch.setattr(st, "markdown", lambda text, *a, **k: rendered.append(text))
+    monkeypatch.setattr(
+        st, "download_button", lambda *args, **kwargs: rendered.append(("download", kwargs["key"])) or False
+    )
+
+    page.render_history_page(container)
+
+    downloads = [item for item in rendered if isinstance(item, tuple)]
+    assert downloads == [("download", "hist_s2_download_pdf")]
+    download_pos = rendered.index(downloads[0])
+    assert rendered.index("**Segunda**") < download_pos < rendered.index("**Terceira**")
+
+
+def test_ver_baixar_marca_a_sessao_escolhida_via_callback() -> None:
+    page._set_viewing("abc123")
+
+    assert st.session_state[page._VIEWING_KEY] == "abc123"
+
+
+# --- renomear -----------------------------------------------------------
+
+
+def test_renomear_clicado_abre_dialogo(monkeypatch) -> None:
+    class _HistoryService:
+        def list_summaries(self):
+            return [{"id": "abc123", "title": "Sessão X", "created_at": None}]
+
+    container = SimpleNamespace(history_service=_HistoryService())
+
+    monkeypatch.setattr(st, "button", lambda label, *a, **k: k.get("key") == "rename_abc123")
+    dialog_calls = []
+    monkeypatch.setattr(page, "_rename_dialog", lambda c, **kwargs: dialog_calls.append(kwargs))
+
+    page.render_history_page(container)
+
+    assert dialog_calls == [{"session_id": "abc123", "title": "Sessão X"}]
+
+
+def _click_only(label_to_click: str):
+    return lambda label, *a, **k: label == label_to_click
+
+
+def test_rename_dialog_ao_salvar_chama_o_servico_com_o_titulo_digitado(monkeypatch) -> None:
+    renamed = []
+
+    class _HistoryService:
+        def rename(self, session_id, new_title):
+            renamed.append((session_id, new_title))
+            return new_title
+
+    container = SimpleNamespace(history_service=_HistoryService())
+    monkeypatch.setattr(st, "text_input", lambda *a, **k: "Título novo")
+    monkeypatch.setattr(st, "button", _click_only("💾 Salvar"))
+
+    page._rename_dialog.__wrapped__(container, session_id="abc123", title="Sessão X")
+
+    assert renamed == [("abc123", "Título novo")]
+
+
+def test_rename_dialog_com_titulo_vazio_nao_chama_o_servico(monkeypatch) -> None:
+    renamed = []
+
+    class _HistoryService:
+        def rename(self, session_id, new_title):
+            renamed.append((session_id, new_title))
+
+    container = SimpleNamespace(history_service=_HistoryService())
+    monkeypatch.setattr(st, "text_input", lambda *a, **k: "   ")
+    monkeypatch.setattr(st, "button", _click_only("💾 Salvar"))
+
+    page._rename_dialog.__wrapped__(container, session_id="abc123", title="Sessão X")
+
+    assert renamed == []
+
+
+def test_rename_dialog_com_erro_do_turso_nao_estoura(monkeypatch) -> None:
+    class _FailingHistoryService:
+        def rename(self, session_id, new_title):
+            raise RepositoryError("turso fora do ar")
+
+    container = SimpleNamespace(history_service=_FailingHistoryService())
+    monkeypatch.setattr(st, "text_input", lambda *a, **k: "Título novo")
+    monkeypatch.setattr(st, "button", _click_only("💾 Salvar"))
+
+    page._rename_dialog.__wrapped__(container, session_id="abc123", title="Sessão X")  # não pode levantar

@@ -222,6 +222,15 @@ class TursoSessionRepository(SessionRepository):
             saved=True,
         )
 
+    def rename(self, session_id: str, *, title: str, pdf_filename: str) -> None:
+        # pdf_filename vai junto pra o download não continuar saindo com o
+        # nome do título antigo. Numa sessão legada (sem pdf_bytes) get()
+        # ignora essa coluna — lá o nome já sai do título na hora de gerar.
+        self._client.execute(
+            "UPDATE sa_study_sessions SET title = ?, pdf_filename = ? WHERE id = ?",
+            [title, pdf_filename, session_id],
+        )
+
     def delete(self, session_id: str) -> None:
         # As 3 instruções num único execute_batch() — 1 request HTTP em vez
         # de 3 — pelo mesmo motivo do save(): menos round-trips de rede.
