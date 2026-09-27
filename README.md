@@ -186,10 +186,12 @@ reiniciado), o que já tinha resposta volta do banco sem chamar a IA. Essas
 respostas são temporárias: somem sozinhas depois de 7 dias.
 
 Os limites são ajustáveis em `[analysis]` no `secrets.toml` (ver
-`.streamlit/secrets.toml.example`): `max_total_chars` (padrão 120 mil
+`.streamlit/secrets.toml.example`): `max_total_chars` (padrão 200 mil
 caracteres por análise, somando os materiais — o que passar disso é
 avisado no fim da seção do material), `batch_chars` e
-`saved_responses_days`.
+`saved_responses_days`. O limite é repartido por prioridade: apostila,
+podcast e outros materiais entram primeiro; os livros (opcionais e, de
+longe, os maiores) ficam com o que sobrar.
 
 ### 3. Criar as tabelas no Turso
 
@@ -266,11 +268,14 @@ streamlit run app.py
   memória, no processo do Streamlit — reinicia se o servidor reiniciar.
   Suficiente para um app pessoal de usuário único; não seria adequado com
   múltiplas réplicas do servidor.
-- A análise em lotes é mais lenta que uma chamada só: um material de uns
-  75 mil caracteres vira ~15 chamadas, com ~5 minutos só de espera entre
-  elas (pra não estourar a cota por minuto), fora o tempo de resposta das
-  IAs. A espera é calculada pelo provedor mais apertado (Groq), mesmo
-  quando quem responde é o Gemini.
+- A análise em lotes é mais lenta que uma chamada só. Medido com uma aula
+  real (apostila + podcast + os dois livros da disciplina, ~165 mil
+  caracteres): 21 chamadas, com ~7 minutos só de espera entre elas (pra
+  não estourar a cota por minuto), fora o tempo de resposta das IAs. A
+  espera é calculada pelo provedor mais apertado (Groq), mesmo quando quem
+  responde é o Gemini. Os livros costumam ser os mesmos em todas as aulas
+  da disciplina: dentro dos 7 dias em que as respostas ficam salvas, a
+  análise deles é reaproveitada nas aulas seguintes, sem nova chamada.
 - No PDF salvo no histórico, o título impresso dentro do arquivo é o da
   hora em que foi salvo — renomear a sessão muda o título da lista e o
   nome do arquivo baixado, não o conteúdo do PDF.

@@ -76,3 +76,24 @@ def test_prompt_de_extracao_pede_so_as_secoes_que_faltam() -> None:
     assert '"desafio_pratico"' in prompt
     assert "referencias_bibliograficas" not in prompt
     assert "não invente" in prompt
+
+
+def test_prompts_finais_pedem_um_texto_unico_e_nao_uma_lista() -> None:
+    """Regressão: a análise das referências veio como lista de objetos."""
+    prompts = [
+        build_references_prompt(references_text="x", topics="y"),
+        build_reading_tips_prompt(tips_text="x", topics="y"),
+        build_challenge_prompt(challenge_text="x", summaries="y"),
+        build_synthesis_prompt(summaries="y"),
+    ]
+    for prompt in prompts:
+        assert "não uma lista nem um objeto" in prompt
+
+
+def test_prompt_de_dicas_nao_deixa_a_ia_tratar_os_assuntos_como_leituras() -> None:
+    """Regressão: com uma dica só (a dissertação do Braga), a IA saiu
+    comentando as partes dos livros como se fossem leituras indicadas."""
+    prompt = build_reading_tips_prompt(tips_text="BRAGA, F. Dissertação. 2015.", topics="- Livro, parte 1")
+    assert "SOMENTE as indicações" in prompt
+    assert "NÃO são indicações de leitura" in prompt
+    assert "Se houver uma indicação só" in prompt

@@ -176,3 +176,65 @@ def test_pdf_mostra_as_partes_da_analise_sem_o_marcador() -> None:
 
     assert "Parte 2 de 2 — Organização do Estado" in text
     assert "###" not in text
+
+
+def test_pdf_nao_desenha_quadrado_preto_no_lugar_de_hifen() -> None:
+    """Regressão: a IA escreve "diferenciando‑se" com o hífen que não quebra
+    linha (U+2011), que a Helvetica não tem — o PDF saía com um quadrado
+    preto no lugar de cada hífen."""
+    from pypdf import PdfReader
+
+    session = _sample_session()
+    session.analysis_result = AnalysisResult(
+        sections={
+            "analise_apostila": (
+                "Diferenciando\u2011se do hardware, a arquitetura cliente\u2010servidor "
+                "usa deploy blue\u2011green\u200b e marcadores \u25aa \U0001f680 fim."
+            )
+        },
+        generated_by_provider="n8n",
+        generated_by_model="cascata",
+        provider_attempts=(),
+    )
+
+    reader = PdfReader(io.BytesIO(PdfReportGenerator().generate(session)))
+    text = "\n".join(page.extract_text() for page in reader.pages)
+
+    assert "\u25a0" not in text  # ■
+    assert "Diferenciando-se" in text
+    assert "cliente-servidor" in text
+    assert "blue-green" in text
+
+
+def _session_with_bold() -> StudySession:
+    session = _sample_session()
+    session.analysis_result = AnalysisResult(
+        sections={"analise_apostila": "Um **Método** formaliza as atividades de um **Processo**."},
+        generated_by_provider="n8n",
+        generated_by_model="cascata",
+        provider_attempts=(),
+    )
+    return session
+
+
+def test_pdf_aplica_o_negrito_da_ia_sem_mostrar_asteriscos() -> None:
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(PdfReportGenerator().generate(_session_with_bold())))
+    page = reader.pages[0]
+    text = page.extract_text()
+    fonts = {str(f.get_object()["/BaseFont"]) for f in page["/Resources"]["/Font"].values()}
+
+    assert "**" not in text
+    assert "Um Método formaliza as atividades de um Processo." in " ".join(text.split())
+    assert "/Helvetica-Bold" in fonts
+
+
+def test_docx_aplica_o_negrito_da_ia_sem_mostrar_asteriscos() -> None:
+    from docx import Document
+
+    document = Document(io.BytesIO(DocxReportGenerator().generate(_session_with_bold())))
+    paragraph = next(p for p in document.paragraphs if "formaliza" in p.text)
+
+    assert paragraph.text == "Um Método formaliza as atividades de um Processo."
+    assert [run.text for run in paragraph.runs if run.bold] == ["Método", "Processo"]

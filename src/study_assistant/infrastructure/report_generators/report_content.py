@@ -5,6 +5,7 @@ no relatório e em que ordem" em cada formato.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from study_assistant.domain.entities import (
@@ -94,6 +95,34 @@ def _reflow_paragraphs(text: str) -> str:
     flush()
 
     return "\n".join(paragraphs)
+
+_BOLD_PATTERN = re.compile(r"\*\*(.+?)\*\*")
+
+
+def split_bold(line: str) -> list[tuple[str, bool]]:
+    """Pedaços de uma linha, marcando os que estavam em **negrito**.
+
+    A IA marca negrito à moda markdown (``**Método**``): a tela mostra
+    certo, mas o PDF e o DOCX exibiam os asteriscos no meio do texto. Os
+    geradores usam isto pra aplicar o negrito de verdade. Asterisco duplo
+    sem par é descartado — nunca aparece solto no documento.
+    """
+    pieces: list[tuple[str, bool]] = []
+    last = 0
+    for match in _BOLD_PATTERN.finditer(line):
+        if match.start() > last:
+            pieces.append((line[last : match.start()], False))
+        pieces.append((match.group(1), True))
+        last = match.end()
+    if last < len(line):
+        pieces.append((line[last:], False))
+    return [(text.replace("**", ""), bold) for text, bold in pieces if text.replace("**", "")]
+
+
+def strip_bold(line: str) -> str:
+    """A linha sem as marcas de negrito (pra títulos, que já são negrito)."""
+    return "".join(text for text, _ in split_bold(line))
+
 
 _MATERIAL_TYPE_LABELS: dict[MaterialType, str] = {
     MaterialType.APOSTILA: "Apostila",

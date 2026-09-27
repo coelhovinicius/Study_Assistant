@@ -109,28 +109,38 @@ TEXTO:
 """
 
 
+def _single_text_answer(key: str) -> str:
+    # Sem isto, a análise das referências veio como uma LISTA de objetos
+    # ({"referencia": ..., "conteudo": ...}) numa análise real do usuário.
+    return (
+        f'Responda apenas com um objeto JSON com a chave "{key}", cujo valor é um\n'
+        "único texto corrido (string) — não uma lista nem um objeto."
+    )
+
+
 def build_references_prompt(*, references_text: str, topics: str) -> str:
     return f"""{_LANGUAGE_AND_TONE}
 
 Você é um tutor especialista. Abaixo estão as referências bibliográficas
 indicadas na apostila de uma disciplina e os assuntos que a disciplina cobre.
 
-ASSUNTOS DA DISCIPLINA:
+ASSUNTOS DA DISCIPLINA (só contexto):
 {topics}
 
 REFERÊNCIAS BIBLIOGRÁFICAS DA APOSTILA:
 {references_text}
 
 TAREFA:
-Analise as referências bibliográficas. Para cada referência, traga o
-conteúdo técnico do assunto que ela aborda (conceitos, técnicas,
-definições, exemplos), não um parágrafo genérico de "por que foi
+Analise SOMENTE as referências bibliográficas listadas acima. Para cada
+referência, traga o conteúdo técnico do assunto que ela aborda (conceitos,
+técnicas, definições, exemplos), não um parágrafo genérico de "por que foi
 indicada". Não invente citações literais nem afirmações sobre o que a
-obra exata "diz" — fique no nível do assunto geral que ela cobre.
+obra exata "diz" — fique no nível do assunto geral que ela cobre. Os
+assuntos da disciplina servem só pra relacionar cada referência ao que foi
+estudado — não são referências e não devem ser comentados um a um.
 {_FORMATTING_RULES}
 
-Responda apenas com um objeto JSON com a chave
-"analise_referencias_bibliograficas".
+{_single_text_answer("analise_referencias_bibliograficas")}
 """
 
 
@@ -140,18 +150,23 @@ def build_reading_tips_prompt(*, tips_text: str, topics: str) -> str:
 Você é um tutor especialista. Abaixo estão as dicas/indicações de leitura
 da apostila de uma disciplina e os assuntos que a disciplina cobre.
 
-ASSUNTOS DA DISCIPLINA:
+ASSUNTOS DA DISCIPLINA (só contexto):
 {topics}
 
 DICAS / INDICAÇÕES DE LEITURA DA APOSTILA:
 {tips_text}
 
 TAREFA:
-Analise as dicas/indicações de leitura: o que cada uma acrescenta ao
-estudo e como aproveitá-las da melhor forma. Não invente conteúdo que não
-esteja nas dicas. {_FORMATTING_RULES}
+Analise SOMENTE as indicações listadas em "DICAS / INDICAÇÕES DE LEITURA
+DA APOSTILA": o que cada uma acrescenta ao estudo e como aproveitá-la da
+melhor forma. Os assuntos da disciplina servem só pra relacionar as
+indicações ao conteúdo — NÃO são indicações de leitura: não os comente um a
+um nem os apresente como leituras recomendadas. Se houver uma indicação só,
+a análise é só dela. Ignore nomes de professor, números de bloco e outras
+marcas de layout que tenham vindo junto com o texto. Não invente conteúdo
+que não esteja nas dicas. {_FORMATTING_RULES}
 
-Responda apenas com um objeto JSON com a chave "analise_dicas_leitura".
+{_single_text_answer("analise_dicas_leitura")}
 """
 
 
@@ -172,7 +187,7 @@ Analise e RESOLVA o desafio prático — explique seu raciocínio
 passo a passo e entregue a resolução completa, fundamentada no material
 resumido acima. {_FORMATTING_RULES}
 
-Responda apenas com um objeto JSON com a chave "analise_e_resolucao_desafio".
+{_single_text_answer("analise_e_resolucao_desafio")}
 """
 
 
@@ -192,5 +207,5 @@ assuntos se relacionam, o que é central e o que é complementar, e o que o
 estudante precisa dominar ao final. Não invente conteúdo que não esteja
 nos resumos. {_FORMATTING_RULES}
 
-Responda apenas com um objeto JSON com a chave "sintese_geral".
+{_single_text_answer("sintese_geral")}
 """

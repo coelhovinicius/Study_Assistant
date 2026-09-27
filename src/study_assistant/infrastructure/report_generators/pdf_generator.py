@@ -14,7 +14,11 @@ import io
 from study_assistant.domain.entities import SECTION_SUBHEADING_PREFIX, StudySession
 from study_assistant.domain.exceptions import ReportGenerationError
 from study_assistant.domain.ports import ReportGenerator
-from study_assistant.infrastructure.report_generators.report_content import build_report_outline
+from study_assistant.infrastructure.report_generators.report_content import (
+    build_report_outline,
+    split_bold,
+    strip_bold,
+)
 
 # Mesma paleta de presentation/theme.py, repetida aqui (não importada
 # diretamente) para manter o gerador de PDF independente do Streamlit —
@@ -25,9 +29,39 @@ _GOLD_LIGHT_HEX = "#e6bf73"
 _MUTED_HEX = "#5a5a5a"
 
 
+# Caracteres que a Helvetica do reportlab NÃO tem e desenha como um
+# quadrado preto (■). O caso real: a IA escreve "diferenciando‑se",
+# "cliente‑servidor", "blue‑green" com o hífen que não quebra linha
+# (U+2011), e o PDF saía com um quadrado no lugar de cada hífen. Cada um
+# vira o equivalente que a fonte tem. Levantado desenhando cada caractere
+# num PDF de teste — setas, aspas curvas, "–", "—", "•", "≥", "✓" e letras
+# gregas a fonte desenha certo, então ficam como estão.
+_PDF_CHAR_REPLACEMENTS = str.maketrans(
+    {
+        "‐": "-",  # hífen
+        "‑": "-",  # hífen que não quebra linha
+        "‒": "–",  # traço de algarismo -> meia-risca
+        "―": "—",  # barra horizontal -> travessão
+        "​": "",  # espaço de largura zero
+        "⁠": "",  # "word joiner"
+        "﻿": "",  # BOM / espaço de largura zero sem quebra
+        "▪": "•",  # ▪ -> •
+        "‣": "•",  # ‣ -> •
+        "⁃": "•",  # ⁃ -> •
+    }
+)
+
+
+def _pdf_safe(text: str) -> str:
+    # Emojis e outros símbolos fora do plano básico do Unicode também
+    # viram quadrado — não têm equivalente na fonte, então saem do PDF.
+    return "".join(ch for ch in text.translate(_PDF_CHAR_REPLACEMENTS) if ord(ch) <= 0xFFFF)
+
+
 def _escape(text: str) -> str:
     return (
-        text.replace("&", "&amp;")
+        _pdf_safe(text)
+        .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
@@ -101,12 +135,20 @@ class PdfReportGenerator(ReportGenerator):
         def heading(text: str) -> Paragraph:
             return Paragraph(_escape(text), heading_style)
 
+        def with_bold(line: str) -> str:
+            # "**Método**" da IA vira negrito de verdade (antes os asteriscos
+            # apareciam no PDF) — escapando cada pedaço antes da marcação.
+            return "".join(
+                f"<b>{_escape(piece)}</b>" if bold else _escape(piece)
+                for piece, bold in split_bold(line)
+            )
+
         def body_paragraphs(text: str, style: ParagraphStyle = body_style) -> list[Paragraph]:
             # "### Parte 2 de 4 — ..." (análise em lotes) sai como subtítulo.
             return [
-                Paragraph(_escape(chunk[len(SECTION_SUBHEADING_PREFIX):].strip()), subheading_style)
+                Paragraph(_escape(strip_bold(chunk[len(SECTION_SUBHEADING_PREFIX):]).strip()), subheading_style)
                 if chunk.startswith(SECTION_SUBHEADING_PREFIX)
-                else Paragraph(_escape(chunk), style)
+                else Paragraph(with_bold(chunk), style)
                 for chunk in text.split("\n")
                 if chunk.strip()
             ]

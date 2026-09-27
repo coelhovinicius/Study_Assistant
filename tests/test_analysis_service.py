@@ -188,3 +188,36 @@ def test_registra_quem_respondeu_e_as_tentativas() -> None:
 
     assert result.generated_by_provider == "n8n"
     assert len(result.provider_attempts) == 5  # lote + referências + dicas + desafio + síntese
+
+
+def test_podcast_entra_no_limite_antes_dos_livros() -> None:
+    """Regressão da análise real do usuário: os dois livros gastaram o limite
+    de caracteres e o podcast — curto e central pra aula — ficou de fora."""
+    provider = ScriptedAIProvider(_responder)
+    materials = [
+        _material(_pages("ap1")),
+        _material(_pages("la", "lb", "lc"), kind=MaterialType.LIVRO, filename="livro.pdf"),
+        _material(_pages("pc1"), kind=MaterialType.AUDIODESCRICAO_PODCAST, filename="podcast.pdf"),
+    ]
+
+    result = _use_case(provider, max_total_chars=500).execute(materials, _FOUND)
+
+    assert "Análise de pc1." in result.sections["analise_podcast"]
+    assert "não foi analisado" not in result.sections["analise_podcast"]
+    assert "os últimos" in result.sections["analise_livro"]  # quem fica com a sobra é o livro
+
+
+def test_resposta_da_ia_em_lista_vira_texto_legivel_na_secao() -> None:
+    """Regressão: a análise das referências veio como lista de objetos e
+    ia pro PDF como "[{'referencia': ..., 'conteudo': ...}]"."""
+
+    def responder(prompt: str) -> str:
+        if "REFERÊNCIAS BIBLIOGRÁFICAS DA APOSTILA" in prompt:
+            return json.dumps(
+                {"analise_referencias_bibliograficas": [{"referencia": "SATO, D. 2014.", "conteudo": "CI e CD."}]}
+            )
+        return _responder(prompt)
+
+    result = _use_case(ScriptedAIProvider(responder)).execute([_material(_pages("p1"))], _FOUND)
+
+    assert result.sections["analise_referencias_bibliograficas"] == "SATO, D. 2014.\nCI e CD."

@@ -55,7 +55,7 @@ def test_sem_secrets_e_sem_yaml_fica_nao_configurado() -> None:
 
 def test_analise_em_lotes_usa_os_padroes_combinados_sem_secao_no_secrets() -> None:
     analysis = load_settings(_BASE_SECRETS).analysis
-    assert analysis.max_total_chars == 120_000
+    assert analysis.max_total_chars == 200_000
     assert analysis.batch_chars == 12_000
     assert analysis.saved_responses_days == 7
 

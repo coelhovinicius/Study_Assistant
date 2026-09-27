@@ -7,7 +7,22 @@ import io
 from study_assistant.domain.entities import SECTION_SUBHEADING_PREFIX, StudySession
 from study_assistant.domain.exceptions import ReportGenerationError
 from study_assistant.domain.ports import ReportGenerator
-from study_assistant.infrastructure.report_generators.report_content import build_report_outline
+from study_assistant.infrastructure.report_generators.report_content import (
+    build_report_outline,
+    split_bold,
+    strip_bold,
+)
+
+
+def _add_body_paragraph(document, text: str, alignment) -> None:  # noqa: ANN001 - tipos do python-docx
+    # "**Método**" da IA vira negrito de verdade (antes os asteriscos
+    # apareciam no documento).
+    body = document.add_paragraph()
+    for piece, bold in split_bold(text):
+        run = body.add_run(piece)
+        if bold:
+            run.bold = True
+    body.alignment = alignment
 
 
 class DocxReportGenerator(ReportGenerator):
@@ -48,8 +63,7 @@ class DocxReportGenerator(ReportGenerator):
             for insight in outline.insights:
                 document.add_heading(f"{insight.label}", level=2)
                 document.add_paragraph(f"({insight.method_label})").italic = True
-                body = document.add_paragraph(insight.content)
-                body.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                _add_body_paragraph(document, insight.content, WD_ALIGN_PARAGRAPH.JUSTIFY)
 
         for title, content in outline.sections:
             document.add_heading(title, level=1)
@@ -58,10 +72,10 @@ class DocxReportGenerator(ReportGenerator):
                     continue
                 if paragraph_text.startswith(SECTION_SUBHEADING_PREFIX):
                     # "### Parte 2 de 4 — ..." (análise em lotes) sai como subtítulo.
-                    document.add_heading(paragraph_text[len(SECTION_SUBHEADING_PREFIX):].strip(), level=2)
+                    heading = strip_bold(paragraph_text[len(SECTION_SUBHEADING_PREFIX):]).strip()
+                    document.add_heading(heading, level=2)
                     continue
-                body = document.add_paragraph(paragraph_text)
-                body.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                _add_body_paragraph(document, paragraph_text, WD_ALIGN_PARAGRAPH.JUSTIFY)
 
         buffer = io.BytesIO()
         document.save(buffer)

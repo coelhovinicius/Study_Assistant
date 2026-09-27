@@ -17,6 +17,7 @@ exemplo, costumam vir espalhadas pela apostila inteira).
 from __future__ import annotations
 
 from study_assistant.application.ai_caller import ProgressFn, ResilientAICaller
+from study_assistant.application.ai_json_utils import ai_text
 from study_assistant.application.apostila_heuristics import extract_sections_heuristically
 from study_assistant.application.text_batches import split_into_batches
 from study_assistant.config.prompts import build_batch_extraction_prompt
@@ -31,7 +32,7 @@ _SECTION_LABELS: dict[str, str] = {
 
 class ExtractApostilaInsightsUseCase:
     def __init__(
-        self, ai_caller: ResilientAICaller, *, batch_chars: int = 12_000, max_chars: int = 120_000
+        self, ai_caller: ResilientAICaller, *, batch_chars: int = 12_000, max_chars: int = 200_000
     ) -> None:
         self._ai_caller = ai_caller
         self._batch_chars = batch_chars
@@ -82,7 +83,7 @@ class ExtractApostilaInsightsUseCase:
                 progress=progress,
             )
             for key in missing:
-                content = str(result.data.get(key) or "").strip()
+                content = ai_text(result.data.get(key))
                 if content:
                     found[key].append(content)
             if progress:

@@ -14,19 +14,27 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from functools import lru_cache
 
+# Todos com \b no começo: sem isso, "referencias" casava dentro de
+# "preferências" ("Recolher preferências e ..." virava o cabeçalho das
+# Referências numa apostila real do usuário).
 _HEADER_PATTERNS: dict[str, re.Pattern[str]] = {
     "referencias_bibliograficas": re.compile(
-        r"referencias(\s+bibliograficas)?\b", re.IGNORECASE
+        r"\breferencias(\s+bibliograficas)?\b", re.IGNORECASE
     ),
+    # "Dica do Professor", "Leitura Fundamental" e "Indicação de leitura 1"
+    # são os cabeçalhos que as apostilas da Kroton/Anhanguera do usuário
+    # usam de fato (conferido nas 30 apostilas dele): sem eles, a dica ia
+    # parar dentro do Desafio Prático e a IA tinha que procurá-la lote a lote.
     "dicas_leitura": re.compile(
-        r"(dicas|indicacoes)\s+de\s+leitura\b|leitura\s+complementar\b|"
-        r"sugestoes?\s+de\s+leitura\b",
+        r"\b(?:(?:dicas|indicacoes|indicacao)\s+de\s+leitura|leitura\s+complementar|"
+        r"sugestoes?\s+de\s+leitura|leitura\s+fundamental|dica\s+do\s+professor)\b",
         re.IGNORECASE,
     ),
     "desafio_pratico": re.compile(
-        r"desafio\s+pratico\b|resolucao\s+do\s+desafio\b|"
-        r"atividade\s+pratica\b|norte\s+para\s+a\s+resolucao\b",
+        r"\b(?:desafio\s+pratico|resolucao\s+do\s+desafio|"
+        r"atividade\s+pratica|norte\s+para\s+a\s+resolucao)\b",
         re.IGNORECASE,
     ),
 }
@@ -34,14 +42,36 @@ _HEADER_PATTERNS: dict[str, re.Pattern[str]] = {
 # Prefixo aceitável antes do cabeçalho na mesma linha (numeração, marcadores, etc.)
 _MAX_LINE_PREFIX_LENGTH = 20
 _LINE_PREFIX_STRIP_CHARS = " .:-–—•\t0123456789"
+# E o que pode vir depois dele na mesma linha ("Indicação de leitura 1").
+# Uma linha de cabeçalho também não é uma frase terminada em ponto:
+# "exemplos e referências na história." (meio do texto) era tomada pelo
+# cabeçalho das Referências numa apostila real do usuário, e a lista de
+# verdade, no fim, ficava de fora. Reticências não contam como fim de
+# frase — "Norte para a resolução..." é cabeçalho de verdade.
+_MAX_LINE_SUFFIX_LENGTH = 40
+
+# Marca de layout que vem logo abaixo de "Dica do Professor" nas apostilas
+# Kroton do usuário ("Bloco 5" + o nome do professor, em linhas próprias) —
+# não é conteúdo da dica. Só sai se for exatamente isso: "Bloco N" sozinho
+# na linha e, embaixo, uma linha curta sem pontuação final (um nome).
+_LAYOUT_BYLINE = re.compile(r"\A\s*bloco\s+\d+\s*\n[^\n.:;!?]{1,60}\n", re.IGNORECASE)
+
+
+@lru_cache(maxsize=None)
+def _fold_char(ch: str) -> str:
+    base = "".join(c for c in unicodedata.normalize("NFKD", ch) if not unicodedata.combining(c)).lower()
+    # "…" vira "..." e "ﬁ" vira "fi" na normalização — um caractere virando
+    # vários desalinhava o texto "dobrado" do original, e cada trecho saía
+    # cortado no começo (ex: "oco 5" em vez de "Bloco 5", numa apostila
+    # real do usuário com reticências). Esses ficam como estão.
+    return base if len(base) == 1 else ch
 
 
 def _fold(text: str) -> str:
     """Remove acentos e baixa a caixa, preservando o comprimento do texto
     (para que os índices encontrados no texto "dobrado" continuem válidos
     no texto original)."""
-    normalized = unicodedata.normalize("NFKD", text)
-    return "".join(ch for ch in normalized if not unicodedata.combining(ch)).lower()
+    return "".join(_fold_char(ch) for ch in text)
 
 
 @dataclass(frozen=True)
@@ -51,10 +81,20 @@ class _HeaderMatch:
     header_end: int  # fim da linha do cabeçalho, onde o conteúdo começa
 
 
-def _is_plausible_header_position(folded_text: str, match_start: int) -> bool:
+def _is_plausible_header_position(folded_text: str, match_start: int, match_end: int) -> bool:
     line_start = folded_text.rfind("\n", 0, match_start) + 1
+    line_end = folded_text.find("\n", match_end)
+    if line_end == -1:
+        line_end = len(folded_text)
     prefix = folded_text[line_start:match_start]
-    return len(prefix.strip(_LINE_PREFIX_STRIP_CHARS)) <= _MAX_LINE_PREFIX_LENGTH
+    suffix = folded_text[match_end:line_end]
+    if len(prefix.strip(_LINE_PREFIX_STRIP_CHARS)) > _MAX_LINE_PREFIX_LENGTH:
+        return False
+    if len(suffix.strip(_LINE_PREFIX_STRIP_CHARS)) > _MAX_LINE_SUFFIX_LENGTH:
+        return False
+    line = folded_text[line_start:line_end].rstrip()
+    ends_sentence = line.endswith(".") and not line.endswith("..")
+    return not ends_sentence
 
 
 def _find_header_matches(original_text: str) -> list[_HeaderMatch]:
@@ -63,12 +103,15 @@ def _find_header_matches(original_text: str) -> list[_HeaderMatch]:
 
     for section_key, pattern in _HEADER_PATTERNS.items():
         for match in pattern.finditer(folded):
-            if not _is_plausible_header_position(folded, match.start()):
+            if not _is_plausible_header_position(folded, match.start(), match.end()):
                 continue
             line_end = folded.find("\n", match.end())
             header_end = line_end + 1 if line_end != -1 else len(folded)
             matches.append(_HeaderMatch(section_key, match.start(), header_end))
-            break  # só a primeira ocorrência de cada seção é usada
+            # Só a primeira ocorrência de cada seção: uma lista de referências
+            # que continua na página seguinte repete o cabeçalho, e o conteúdo
+            # tem que seguir até o próximo cabeçalho de OUTRA seção.
+            break
 
     return sorted(matches, key=lambda m: m.start)
 
@@ -86,7 +129,7 @@ def extract_sections_heuristically(apostila_text: str) -> dict[str, str]:
     results: dict[str, str] = {}
     for index, header_match in enumerate(matches):
         next_start = matches[index + 1].start if index + 1 < len(matches) else len(apostila_text)
-        content = apostila_text[header_match.header_end : next_start].strip()
+        content = _LAYOUT_BYLINE.sub("", apostila_text[header_match.header_end : next_start]).strip()
         if content:
             results[header_match.section_key] = content
 

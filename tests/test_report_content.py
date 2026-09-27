@@ -191,3 +191,17 @@ def test_reflow_mantem_o_subtitulo_de_parte_numa_linha_propria() -> None:
         "### Parte 2 de 2 — Organização",
         "Segundo.",
     ]
+
+
+def test_split_bold_separa_os_trechos_em_negrito_do_markdown() -> None:
+    from study_assistant.infrastructure.report_generators.report_content import split_bold, strip_bold
+
+    assert split_bold("Um **Método** formaliza o **Processo**.") == [
+        ("Um ", False),
+        ("Método", True),
+        (" formaliza o ", False),
+        ("Processo", True),
+        (".", False),
+    ]
+    assert split_bold("asterisco sem par ** some") == [("asterisco sem par  some", False)]
+    assert strip_bold("### **Parte 1** — Título") == "### Parte 1 — Título"

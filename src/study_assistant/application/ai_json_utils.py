@@ -42,3 +42,29 @@ def parse_json_response(raw_text: str) -> dict:
         "Não foi possível interpretar a resposta da IA como um JSON válido. "
         f"Resposta recebida (início): {raw_text[:300]!r}"
     )
+
+
+def ai_text(value: object) -> str:
+    """O valor de uma chave da resposta da IA como texto corrido.
+
+    Pedimos texto, mas às vezes o modelo devolve estrutura — ex: a análise
+    das referências veio como uma lista de ``{"referencia": ...,
+    "conteudo": ...}``, e ``str()`` disso ia parar no PDF como
+    ``[{'referencia': ...}]``. Lista vira parágrafos separados; objeto vira
+    os seus valores, um por linha (as chaves são só rótulos técnicos).
+
+    Também desfaz a quebra de linha escapada duas vezes (o texto chega com
+    ``\\n`` literal em vez de uma quebra de verdade) — visto com o
+    gpt-oss do Groq, e que aparecia no PDF como "\\n\\n" no meio do texto.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, dict):
+        text = "\n".join(part for part in (ai_text(v) for v in value.values()) if part)
+    elif isinstance(value, (list, tuple)):
+        text = "\n\n".join(part for part in (ai_text(v) for v in value) if part)
+    else:
+        text = str(value)
+    return text.replace("\\r\\n", "\n").replace("\\n", "\n").strip()

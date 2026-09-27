@@ -86,9 +86,11 @@ class AnalysisSettings:
     """Análise em lotes (ver ``application/analysis_service.py``)."""
 
     # Limite de texto analisado por rodada, somando todos os materiais
-    # (~10 lotes). Acima disso, o resto de cada material não é analisado e
-    # uma observação diz quanto ficou de fora.
-    max_total_chars: int = 120_000
+    # (~17 lotes). Cabe a apostila, o podcast e os dois livros de uma
+    # disciplina real do usuário (~165 mil caracteres) — com 120 mil, o fim
+    # do Livro 2 ficava de fora. Acima do limite, o resto do material não é
+    # analisado e uma observação diz quanto ficou de fora.
+    max_total_chars: int = 200_000
     # Tamanho de cada lote — o mesmo do qa_testgen, que já cabe na cota por
     # minuto das IAs gratuitas da cascata.
     batch_chars: int = 12_000

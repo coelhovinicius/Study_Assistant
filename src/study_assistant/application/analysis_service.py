@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from study_assistant.application.ai_caller import AICallResult, ProgressFn, ResilientAICaller
+from study_assistant.application.ai_json_utils import ai_text
 from study_assistant.application.text_batches import split_into_batches
 from study_assistant.config.prompts import (
     BATCH_ANALYSIS_KEYS,
@@ -74,6 +75,18 @@ _MATERIAL_FOCUS: dict[MaterialType, str] = {
     MaterialType.OUTRO: (
         "as principais ideias deste material e como elas se relacionam com o conteúdo da disciplina."
     ),
+}
+
+# Quem entra primeiro no limite de caracteres por análise. Antes era a
+# ordem de envio (apostila, livros, podcast): numa análise real do usuário,
+# os dois livros da disciplina (~158 mil caracteres) gastaram o limite e o
+# podcast — curto e central pra aula — ficou de fora. Livros vão por
+# último: são opcionais, complementares e, de longe, os maiores.
+_BUDGET_PRIORITY: dict[MaterialType, int] = {
+    MaterialType.APOSTILA: 0,
+    MaterialType.AUDIODESCRICAO_PODCAST: 1,
+    MaterialType.OUTRO: 2,
+    MaterialType.LIVRO: 3,
 }
 
 # Seção final sem o trecho correspondente na apostila: vai uma frase fixa,
@@ -128,7 +141,7 @@ class AnalyzeStudyMaterialsUseCase:
         ai_caller: ResilientAICaller,
         *,
         batch_chars: int = 12_000,
-        max_total_chars: int = 120_000,
+        max_total_chars: int = 200_000,
     ) -> None:
         self._ai_caller = ai_caller
         self._batch_chars = batch_chars
@@ -172,9 +185,9 @@ class AnalyzeStudyMaterialsUseCase:
             analyses.append(
                 _BatchAnalysis(
                     batch=batch,
-                    title=str(result.data.get("titulo") or "").strip(),
-                    analysis=str(result.data.get("analise") or "").strip(),
-                    summary=str(result.data.get("resumo") or "").strip(),
+                    title=ai_text(result.data.get("titulo")),
+                    analysis=ai_text(result.data.get("analise")),
+                    summary=ai_text(result.data.get("resumo")),
                 )
             )
             _report_done(progress, label, result)
@@ -198,7 +211,7 @@ class AnalyzeStudyMaterialsUseCase:
                 progress=progress,
             )
             results.append(result)
-            sections[final_call.section_key] = str(result.data.get(final_call.section_key) or "").strip()
+            sections[final_call.section_key] = ai_text(result.data.get(final_call.section_key))
             _report_done(progress, label, result)
 
         return AnalysisResult(
@@ -209,13 +222,14 @@ class AnalyzeStudyMaterialsUseCase:
         )
 
     def _plan(self, materials: list[Material]) -> tuple[list[_Batch], dict[str, str]]:
-        """Lotes de cada material, na ordem em que vieram (apostila primeiro),
-        dentro do limite total de caracteres por análise. O que passa do
-        limite não some calado: vira uma observação no fim da seção."""
+        """Lotes de cada material, dentro do limite total de caracteres por
+        análise, repartido por prioridade (``_BUDGET_PRIORITY``): apostila,
+        podcast e outros materiais primeiro, livros por último. O que passa
+        do limite não some calado: vira uma observação no fim da seção."""
         remaining = self._max_total_chars
         batches: list[_Batch] = []
         notes: dict[str, str] = {}
-        for material in materials:
+        for material in sorted(materials, key=lambda m: _BUDGET_PRIORITY[m.material_type]):
             text = material.raw_text.strip()
             taken = text[: max(remaining, 0)]
             remaining -= len(taken)
