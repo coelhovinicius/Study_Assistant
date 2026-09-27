@@ -103,6 +103,23 @@ class ProviderAttempt:
     attempted_at: datetime = field(default_factory=_now)
 
 
+@dataclass(frozen=True)
+class SavedAIResponse:
+    """Uma resposta da IA já recebida e guardada, pra não ter que pedir de
+    novo o mesmo lote (ver ``AIResponseStore``)."""
+
+    text: str
+    provider_name: str
+    model: str
+
+
+# Linha que abre uma subdivisão dentro de uma seção da análise (ex: "###
+# Parte 2 de 4 — Direitos Fundamentais", uma por lote do material). Mesmo
+# prefixo de título do markdown, então a tela já mostra como subtítulo; os
+# geradores de PDF/DOCX reconhecem esse prefixo e fazem o mesmo.
+SECTION_SUBHEADING_PREFIX = "### "
+
+
 # Ordem e nomes das seções do relatório final, na ordem em que devem
 # aparecer no documento entregue ao usuário (item 6.1 do fluxo original).
 ANALYSIS_SECTION_ORDER: tuple[str, ...] = (

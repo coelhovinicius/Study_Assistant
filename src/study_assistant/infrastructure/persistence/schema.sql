@@ -53,6 +53,21 @@ CREATE TABLE IF NOT EXISTS sa_provider_attempts (
     attempted_at TEXT NOT NULL
 );
 
+-- sa_ai_respostas: cada resposta da IA na análise em lotes, gravada assim
+-- que chega, pra uma análise pausada (IA fora do ar, cota esgotada,
+-- navegador fechado) continuar depois SEM mandar de novo o que já foi
+-- respondido. Não guarda o texto dos materiais, só a resposta, identificada
+-- por um hash do pedido (cache_key). Temporária: o app apaga sozinho as
+-- linhas com mais de alguns dias ([analysis] saved_responses_days).
+CREATE TABLE IF NOT EXISTS sa_ai_respostas (
+    cache_key TEXT PRIMARY KEY,
+    response TEXT NOT NULL,
+    provider_name TEXT,
+    model TEXT,
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sa_materials_session_id ON sa_materials(session_id);
 CREATE INDEX IF NOT EXISTS idx_sa_provider_attempts_session_id ON sa_provider_attempts(session_id);
 CREATE INDEX IF NOT EXISTS idx_sa_study_sessions_created_at ON sa_study_sessions(created_at);
+CREATE INDEX IF NOT EXISTS idx_sa_ai_respostas_created_at ON sa_ai_respostas(created_at);

@@ -139,3 +139,40 @@ def test_pdf_generator_nao_menciona_mais_o_provedor_e_usa_horario_de_brasilia() 
     assert "31/08/2026 11:30" in text
     assert "horário de Brasília" not in text
     assert "Análise detalhada" in text
+
+
+def _session_with_parts() -> StudySession:
+    session = _sample_session()
+    session.analysis_result = AnalysisResult(
+        sections={
+            "analise_apostila": (
+                "### Parte 1 de 2 — Fundamentos\nAnálise da primeira parte.\n\n"
+                "### Parte 2 de 2 — Organização do Estado\nAnálise da segunda parte."
+            )
+        },
+        generated_by_provider="n8n",
+        generated_by_model="cascata",
+        provider_attempts=(),
+    )
+    return session
+
+
+def test_docx_mostra_as_partes_da_analise_como_subtitulo() -> None:
+    from docx import Document
+
+    document = Document(io.BytesIO(DocxReportGenerator().generate(_session_with_parts())))
+
+    headings = [p.text for p in document.paragraphs if p.style.name == "Heading 2"]
+    assert "Parte 1 de 2 — Fundamentos" in headings
+    assert "Parte 2 de 2 — Organização do Estado" in headings
+    assert not any("###" in p.text for p in document.paragraphs)
+
+
+def test_pdf_mostra_as_partes_da_analise_sem_o_marcador() -> None:
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(PdfReportGenerator().generate(_session_with_parts())))
+    text = "\n".join(page.extract_text() for page in reader.pages)
+
+    assert "Parte 2 de 2 — Organização do Estado" in text
+    assert "###" not in text

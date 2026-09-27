@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 
-from study_assistant.domain.entities import StudySession
+from study_assistant.domain.entities import SECTION_SUBHEADING_PREFIX, StudySession
 from study_assistant.domain.exceptions import ReportGenerationError
 from study_assistant.domain.ports import ReportGenerator
 from study_assistant.infrastructure.report_generators.report_content import build_report_outline
@@ -54,9 +54,14 @@ class DocxReportGenerator(ReportGenerator):
         for title, content in outline.sections:
             document.add_heading(title, level=1)
             for paragraph_text in content.split("\n"):
-                if paragraph_text.strip():
-                    body = document.add_paragraph(paragraph_text)
-                    body.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                if not paragraph_text.strip():
+                    continue
+                if paragraph_text.startswith(SECTION_SUBHEADING_PREFIX):
+                    # "### Parte 2 de 4 — ..." (análise em lotes) sai como subtítulo.
+                    document.add_heading(paragraph_text[len(SECTION_SUBHEADING_PREFIX):].strip(), level=2)
+                    continue
+                body = document.add_paragraph(paragraph_text)
+                body.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
         buffer = io.BytesIO()
         document.save(buffer)

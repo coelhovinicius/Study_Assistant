@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from study_assistant.domain.entities import (
+    SECTION_SUBHEADING_PREFIX,
     ExtractionMethod,
     MaterialType,
     StudySession,
@@ -58,6 +59,11 @@ def _reflow_paragraphs(text: str) -> str:
     linha visualmente quebrada). Texto que já vem "limpo" (um parágrafo
     completo por linha, cada um terminando em pontuação) passa por aqui
     sem alteração nenhuma.
+
+    Subtítulo das partes da análise em lotes ("### Parte 2 de 4 — ...",
+    ver ``SECTION_SUBHEADING_PREFIX``) é sempre uma linha própria: não
+    termina em pontuação, então sem essa regra o parágrafo seguinte seria
+    grudado nele.
     """
     normalized = text.replace("\r\n", "\n").strip()
     if not normalized:
@@ -75,6 +81,10 @@ def _reflow_paragraphs(text: str) -> str:
         line = raw_line.strip()
         if not line:
             flush()
+            continue
+        if line.startswith(SECTION_SUBHEADING_PREFIX):
+            flush()
+            paragraphs.append(line)
             continue
         starts_new_item = line.startswith(_BULLET_PREFIXES)
         previous_line_ended_sentence = bool(buffer) and buffer[-1].endswith(_SENTENCE_END_CHARS)

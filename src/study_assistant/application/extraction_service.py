@@ -4,27 +4,23 @@ de leitura e o desafio prático (itens 3, 4 e 5 do fluxo manual original).
 Estratégia em duas camadas, do mais barato para o mais caro:
 1. Heurística por cabeçalhos (``apostila_heuristics``) — instantânea, sem
    custo de API.
-2. Se a heurística não encontrar uma seção com confiança, cai para uma
-   chamada de IA dedicada e pequena, pedindo só aquele trecho específico
-   (reaproveita o mesmo ``AIProvider``/cascata usado na análise final).
+2. Se a heurística não encontrar alguma seção, a apostila é lida pela IA em
+   lotes (os mesmos da análise, ~12 mil caracteres cada), com UMA chamada
+   por lote pedindo todas as seções que faltam de uma vez. Antes eram até 3
+   chamadas com 40 mil caracteres cada — o que sozinho já estourava a cota
+   por minuto das IAs gratuitas.
 
-Isso é intencionalmente independente da análise completa (item 6): mesmo
-que a análise final falhe por algum motivo, as extrações já feitas aqui
-não se perdem.
+O que cada lote encontra é juntado, em ordem (dicas de leitura, por
+exemplo, costumam vir espalhadas pela apostila inteira).
 """
 
 from __future__ import annotations
 
-from study_assistant.application.ai_json_utils import parse_json_response
+from study_assistant.application.ai_caller import ProgressFn, ResilientAICaller
 from study_assistant.application.apostila_heuristics import extract_sections_heuristically
-from study_assistant.config.prompts import build_section_extraction_prompt
+from study_assistant.application.text_batches import split_into_batches
+from study_assistant.config.prompts import build_batch_extraction_prompt
 from study_assistant.domain.entities import ApostilaInsights, ExtractedSection, ExtractionMethod
-from study_assistant.domain.exceptions import (
-    AIProviderError,
-    AllProvidersFailedError,
-    InvalidAIResponseError,
-)
-from study_assistant.domain.ports import AIProvider
 
 _SECTION_LABELS: dict[str, str] = {
     "referencias_bibliograficas": "Referências Bibliográficas",
@@ -32,26 +28,32 @@ _SECTION_LABELS: dict[str, str] = {
     "desafio_pratico": "Desafio Prático (e norte para a resolução)",
 }
 
-# Evita mandar apostilas gigantescas repetidas vezes para a IA de extração;
-# a análise completa (item 6) ainda recebe o texto completo.
-_MAX_CHARS_FOR_EXTRACTION_FALLBACK = 40_000
-
 
 class ExtractApostilaInsightsUseCase:
-    def __init__(self, ai_provider: AIProvider) -> None:
-        self._ai_provider = ai_provider
+    def __init__(
+        self, ai_caller: ResilientAICaller, *, batch_chars: int = 12_000, max_chars: int = 120_000
+    ) -> None:
+        self._ai_caller = ai_caller
+        self._batch_chars = batch_chars
+        self._max_chars = max_chars
 
-    def execute(self, apostila_text: str) -> ApostilaInsights:
+    def execute(self, apostila_text: str, *, progress: ProgressFn | None = None) -> ApostilaInsights:
         heuristic_hits = extract_sections_heuristically(apostila_text)
 
-        sections: dict[str, ExtractedSection] = {}
-        for key, label in _SECTION_LABELS.items():
-            if key in heuristic_hits:
+        sections: dict[str, ExtractedSection] = {
+            key: ExtractedSection(content=heuristic_hits[key], method=ExtractionMethod.HEURISTICA)
+            for key in _SECTION_LABELS
+            if key in heuristic_hits
+        }
+        missing = {key: label for key, label in _SECTION_LABELS.items() if key not in sections}
+        if missing:
+            found_by_ai = self._extract_with_ai(apostila_text, missing, progress)
+            for key in missing:
+                content = "\n\n".join(found_by_ai[key])
                 sections[key] = ExtractedSection(
-                    content=heuristic_hits[key], method=ExtractionMethod.HEURISTICA
+                    content=content,
+                    method=ExtractionMethod.IA if content else ExtractionMethod.NAO_ENCONTRADO,
                 )
-            else:
-                sections[key] = self._extract_with_ai_fallback(key, label, apostila_text)
 
         return ApostilaInsights(
             referencias_bibliograficas=sections["referencias_bibliograficas"],
@@ -59,19 +61,30 @@ class ExtractApostilaInsightsUseCase:
             desafio_pratico=sections["desafio_pratico"],
         )
 
-    def _extract_with_ai_fallback(
-        self, key: str, label: str, apostila_text: str
-    ) -> ExtractedSection:
-        truncated_text = apostila_text[:_MAX_CHARS_FOR_EXTRACTION_FALLBACK]
-        prompt = build_section_extraction_prompt(section_label=label, apostila_text=truncated_text)
-
-        try:
-            raw_response = self._ai_provider.generate(prompt, response_format="json")
-            data = parse_json_response(raw_response)
-        except (AIProviderError, AllProvidersFailedError, InvalidAIResponseError):
-            return ExtractedSection(content="", method=ExtractionMethod.NAO_ENCONTRADO)
-
-        content = str(data.get("conteudo") or "").strip()
-        if data.get("encontrado") and content:
-            return ExtractedSection(content=content, method=ExtractionMethod.IA)
-        return ExtractedSection(content="", method=ExtractionMethod.NAO_ENCONTRADO)
+    def _extract_with_ai(
+        self, apostila_text: str, missing: dict[str, str], progress: ProgressFn | None
+    ) -> dict[str, list[str]]:
+        found: dict[str, list[str]] = {key: [] for key in missing}
+        batches = split_into_batches(apostila_text[: self._max_chars], self._batch_chars)
+        total = len(batches)
+        for number, batch in enumerate(batches, start=1):
+            label = (
+                f"Procurando referências, dicas e desafio na apostila — parte {number} de {total}"
+                if total > 1
+                else "Procurando referências, dicas e desafio na apostila"
+            )
+            result = self._ai_caller.call_json(
+                build_batch_extraction_prompt(
+                    sections=missing, part_number=number, part_count=total, text=batch
+                ),
+                required_keys=tuple(missing),
+                label=label,
+                progress=progress,
+            )
+            for key in missing:
+                content = str(result.data.get(key) or "").strip()
+                if content:
+                    found[key].append(content)
+            if progress:
+                progress(f"✅ {label}{' (já estava salva)' if result.from_saved else ''}", done=True)
+        return found

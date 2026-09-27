@@ -51,3 +51,18 @@ def test_secrets_tem_prioridade_sobre_yaml(_isolate_auth_yaml_path: Path) -> Non
 def test_sem_secrets_e_sem_yaml_fica_nao_configurado() -> None:
     settings = load_settings(_BASE_SECRETS)
     assert settings.auth.is_configured is False
+
+
+def test_analise_em_lotes_usa_os_padroes_combinados_sem_secao_no_secrets() -> None:
+    analysis = load_settings(_BASE_SECRETS).analysis
+    assert analysis.max_total_chars == 120_000
+    assert analysis.batch_chars == 12_000
+    assert analysis.saved_responses_days == 7
+
+
+def test_analise_em_lotes_pode_ser_ajustada_pelo_secrets() -> None:
+    secrets = {**_BASE_SECRETS, "analysis": {"max_total_chars": 60000, "saved_responses_days": 3}}
+    analysis = load_settings(secrets).analysis
+    assert analysis.max_total_chars == 60_000
+    assert analysis.batch_chars == 12_000
+    assert analysis.saved_responses_days == 3

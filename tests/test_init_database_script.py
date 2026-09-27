@@ -23,10 +23,11 @@ def test_extrai_todos_os_create_table_do_schema_real() -> None:
     statements = _split_statements(sql_text)
 
     create_tables = [s for s in statements if s.upper().startswith("CREATE TABLE")]
-    assert len(create_tables) == 3
+    assert len(create_tables) == 4
     assert any("sa_study_sessions" in s for s in create_tables)
     assert any("sa_materials" in s for s in create_tables)
     assert any("sa_provider_attempts" in s for s in create_tables)
+    assert any("sa_ai_respostas" in s for s in create_tables)
 
 
 def test_nao_perde_comando_colado_direto_apos_comentario_de_cabecalho() -> None:

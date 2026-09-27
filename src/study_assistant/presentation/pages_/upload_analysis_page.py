@@ -10,6 +10,7 @@ from study_assistant.application.document_service import UploadedFile
 from study_assistant.domain.entities import MaterialType, StudySession
 from study_assistant.domain.exceptions import (
     AllProvidersFailedError,
+    AnalysisPausedError,
     ReportGenerationError,
     RepositoryError,
     StudyAssistantError,
@@ -39,6 +40,10 @@ _IS_ANALYZING_KEY = "is_analyzing"
 _IS_SAVING_KEY = "is_saving"
 _SAVE_NOTICE_KEY = "save_notice"
 _ANALYSIS_NOTICE_KEY = "analysis_notice"
+# Análise pausada num lote que falhou (ver AnalysisPausedError): o botão
+# de analisar vira "Continuar análise" — os lotes já respondidos ficam
+# salvos, então continuar só manda pra IA o que falta.
+_ANALYSIS_PAUSED_KEY = "analysis_paused"
 
 
 def has_unsaved_analysis() -> bool:
@@ -83,6 +88,11 @@ def _render_notice(notice: dict) -> None:
     kind = notice["kind"]
     if kind == "success":
         st.success(notice["message"])
+    elif kind == "paused":
+        st.warning(notice["message"])
+        if notice.get("detail"):
+            with st.expander("Detalhes técnicos"):
+                st.code(notice["detail"])
     else:
         st.error(notice["message"])
         if notice.get("detail"):
@@ -99,6 +109,7 @@ def _confirm_new_analysis_dialog(*, has_unsaved_result: bool) -> None:
     with confirm_col:
         if themed_button("🆕 Confirmar", variant="delete", use_container_width=True):
             st.session_state.pop(_SESSION_STATE_KEY, None)
+            st.session_state.pop(_ANALYSIS_PAUSED_KEY, None)
             _reset_form_widgets()
             st.rerun()
     with cancel_col:
@@ -115,6 +126,7 @@ def _confirm_discard_dialog(*, has_unsaved_result: bool) -> None:
     with confirm_col:
         if themed_button("🗑️ Confirmar", variant="delete", use_container_width=True):
             st.session_state.pop(_SESSION_STATE_KEY, None)
+            st.session_state.pop(_ANALYSIS_PAUSED_KEY, None)
             _reset_form_widgets()
             st.rerun()
     with cancel_col:
@@ -197,8 +209,14 @@ def render_upload_analysis_page(container: AppContainer) -> None:
     if not is_analyzing and not can_analyze:
         st.info(f"Para habilitar a análise, {' e '.join(missing)}.")
 
+    if is_analyzing:
+        analyze_label = "⏳ Analisando..."
+    elif st.session_state.get(_ANALYSIS_PAUSED_KEY, False):
+        analyze_label = "▶️ Continuar análise"
+    else:
+        analyze_label = "🚀 Analisar materiais"
     analyze_clicked = st.button(
-        "⏳ Analisando..." if is_analyzing else "🚀 Analisar materiais",
+        analyze_label,
         type="primary",
         disabled=not can_analyze or is_busy,
         key="btn_analyze",
@@ -243,13 +261,16 @@ def _build_uploaded_files(apostila_files, livro_files, podcast_files, outros_fil
     return uploaded_files
 
 
-def _do_pipeline_work(container: AppContainer, uploaded_files: list[UploadedFile]):
+def _do_pipeline_work(container: AppContainer, uploaded_files: list[UploadedFile], progress=None):
     materials = container.document_service.ingest(uploaded_files)
+    # Respostas de IA guardadas há mais de alguns dias não servem mais pra
+    # continuar nada — limpa antes de começar (falha aqui não trava nada).
+    container.ai_caller.purge_expired()
     apostila_text = "\n\n".join(
         m.raw_text for m in materials if m.material_type is MaterialType.APOSTILA
     )
-    insights = container.extraction_use_case.execute(apostila_text)
-    analysis = container.analysis_use_case.execute(materials, insights)
+    insights = container.extraction_use_case.execute(apostila_text, progress=progress)
+    analysis = container.analysis_use_case.execute(materials, insights, progress=progress)
     return materials, insights, analysis
 
 
@@ -262,19 +283,41 @@ def _run_analysis(
     podcast_files,
     outros_files,
 ) -> None:
-    """Roda a cascata de IA de forma síncrona (bloqueia o script até
-    terminar) — ``st.spinner`` é o feedback visual de que algo está
-    acontecendo. Os widgets acima já estão desabilitados (``is_busy=True``
-    desde o rerun anterior), então não dá pra mexer em mais nada enquanto
-    isto roda, mesmo sem uma tela escurecida por cima.
+    """Roda a análise em lotes de forma síncrona (bloqueia o script até
+    terminar) — o ``st.status`` mostra em que lote está, as esperas entre
+    lotes (cota por minuto das IAs gratuitas) e a lista do que já ficou
+    pronto. Os widgets acima já estão desabilitados (``is_busy=True`` desde
+    o rerun anterior), então não dá pra mexer em mais nada enquanto isto
+    roda, mesmo sem uma tela escurecida por cima.
     """
-    with st.spinner(
-        "Analisando os materiais — isso pode levar alguns segundos, "
-        "dependendo da cascata de IA..."
-    ):
+    with st.status(
+        "Analisando os materiais em lotes — pode levar alguns minutos...", expanded=True
+    ) as status:
+
+        def progress(message: str, *, done: bool = False) -> None:
+            if done:
+                status.write(message)
+            else:
+                status.update(label=message)
+
         uploaded_files = _build_uploaded_files(apostila_files, livro_files, podcast_files, outros_files)
         try:
-            materials, insights, analysis = _do_pipeline_work(container, uploaded_files)
+            materials, insights, analysis = _do_pipeline_work(container, uploaded_files, progress)
+        except AnalysisPausedError as exc:
+            # Nada se perde: cada lote respondido já está salvo. Continuar
+            # (com os mesmos arquivos) só manda pra IA o que falta.
+            st.session_state[_ANALYSIS_PAUSED_KEY] = True
+            cause = exc.cause or "A IA não conseguiu responder depois de 3 tentativas."
+            notice = {
+                "kind": "paused",
+                "message": (
+                    f"⏸️ A análise foi pausada em **{exc.step_label}**. {cause} "
+                    "Tudo o que já foi analisado ficou salvo — clique em **▶️ Continuar "
+                    "análise** quando quiser: com os mesmos arquivos, só o que falta vai "
+                    "para a IA."
+                ),
+                "detail": exc.detail,
+            }
         except AllProvidersFailedError as exc:
             notice = {
                 "kind": "error",
@@ -299,7 +342,12 @@ def _run_analysis(
             st.session_state[_SESSION_STATE_KEY] = StudySession(
                 title=title, materials=materials, apostila_insights=insights, analysis_result=analysis
             )
+            st.session_state.pop(_ANALYSIS_PAUSED_KEY, None)
             notice = {"kind": "success", "message": "Análise concluída!"}
+
+    if warning := container.ai_caller.persistence_warning:
+        notice["message"] = f"{notice['message']}\n\n⚠️ {warning}"
+        container.ai_caller.persistence_warning = None
 
     st.session_state[_IS_ANALYZING_KEY] = False
     st.session_state[_ANALYSIS_NOTICE_KEY] = notice

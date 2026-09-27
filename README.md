@@ -4,8 +4,9 @@ Automação pessoal do fluxo de estudo descrito no chat: você sobe a
 apostila (e, opcionalmente, livro, audiodescrição do podcast e outros
 materiais), o app extrai automaticamente as referências bibliográficas, as
 dicas/indicações de leitura e o desafio prático da apostila, manda tudo
-para uma cascata de provedores de IA (OpenAI → Gemini → Groq → Groq →
-Mistral, com fallback automático caso um falhe — via webhook do seu n8n,
+— em lotes que cabem na cota por minuto das IAs gratuitas — para uma
+cascata de provedores de IA (Gemini → Groq → Groq 2 → Mistral → OpenAI →
+Groq 3, com fallback automático caso um falhe — via webhook do seu n8n,
 mesmo padrão dos seus outros apps, ou direto em Python, você escolhe) e
 devolve uma análise completa dividida por assunto, com a resolução do
 desafio — pronta para baixar em `.docx`, `.pdf`, `.txt` ou `.csv`, com a
@@ -98,39 +99,50 @@ Esse arquivo já está no `.gitignore` — nunca vai para o Git.
 
 ### 2.1. Modo de IA: n8n ou Python direto
 
-O app aceita dois jeitos de rodar a cascata OpenAI → Gemini → Groq →
-Groq → Mistral, e você escolhe qual usar só preenchendo (ou não) o
-`[n8n]` em `secrets.toml` — nenhum código muda entre um modo e outro
-(`_build_ai_providers()` em `presentation/di_container.py` decide isso
-sozinho, olhando `settings.n8n.is_configured`).
+O app aceita dois jeitos de rodar a cascata de IA, e você escolhe qual
+usar só preenchendo (ou não) o `[n8n]` em `secrets.toml` — nenhum código
+muda entre um modo e outro (`_build_ai_providers()` em
+`presentation/di_container.py` decide isso sozinho, olhando
+`settings.n8n.is_configured`).
 
 **Modo n8n (recomendado — é o que você já usa nos outros apps):**
 
 1. Abra sua instância n8n e importe `n8n/study_assistant_ai_cascade.json`
    (Workflows → Import from File).
-2. O workflow já vem com as 5 credenciais linkadas pelos mesmos IDs que
-   você usa no `Doc_QA_Generation_HA` (OpenAI account, Google
-   Gemini(PaLM) Api account, Groq account, Groq account 2, Mistral Cloud
-   account, Header Auth account 4) — se essas credenciais existirem na
-   sua instância, elas conectam sozinhas; se o n8n reclamar de alguma,
-   é só reapontar para a credencial certa manualmente.
+2. O workflow já vem com as credenciais linkadas pelos mesmos IDs que
+   você usa no `Doc_QA_Generation_HA` (Google Gemini(PaLM) Api account,
+   Groq account, Groq account 2, Mistral Cloud account, OpenAI account,
+   Groq account 3, Header Auth account 5) — se essas credenciais
+   existirem na sua instância, elas conectam sozinhas; se o n8n reclamar
+   de alguma, é só reapontar para a credencial certa manualmente.
 3. Ative o workflow e copie a URL do webhook (nó "Webhook - Cascata
    IA").
 4. Cole essa URL em `[n8n].webhook_url` no `secrets.toml`, e o mesmo
    header/valor de autenticação que a credencial "Header Auth account
-   4" espera em `auth_header_name`/`auth_header_value`.
+   5" espera em `auth_header_name`/`auth_header_value`.
 
-Diferente do `Doc_QA_Generation_HA` original (que serviu de referência),
-este workflow é **genérico**: os nós "Chain" só repassam
-`{{ $json.body.prompt }}` — nenhum prompt de negócio, schema ou Output
-Parser vive dentro do n8n. Todo o texto do prompt (`config/prompts.py`)
-e a interpretação da resposta (`application/ai_json_utils.py`) ficam no
-Python, versionados e testados; o n8n vira só o "motor de execução com
-fallback entre provedores". Duas correções em relação ao fluxo de
-exemplo: o webhook agora liga na OpenAI Chain primeiro (no original ele
-pulava direto para a Gemini Chain, por engano), e existe um nó
-"Responder Erro" (HTTP 502) para quando até o Mistral falha — no
-original, esse caso não tinha resposta nenhuma.
+O workflow segue o mesmo padrão do `Doc_QA_Generation_HA`:
+
+- cascata **Gemini → Groq → Groq 2 → Mistral → OpenAI → Groq 3**
+  (gpt-oss-20b, na conta "Groq account 3"), com limite de tokens de
+  resposta e sem retentativa interna de cada modelo;
+- cada IA passa por um nó **"JSON ..."** que extrai e valida o JSON da
+  resposta (tolera cerca de markdown, texto em volta e vírgula sobrando)
+  e confere as chaves obrigatórias — resposta fora do formato vai pra
+  próxima IA, em vez de voltar quebrada pro app;
+- erro 5xx/sobrecarga de uma IA passa por **"Erro 5xx?"** → **"Aguardar
+  5s"** e tenta a MESMA IA de novo (até 2 vezes) antes de ir pra próxima;
+- "Responder Erro" (HTTP 502) só quando até o Groq 3 falha, com o motivo
+  real em `detalhe`.
+
+A diferença é que ele é **genérico**: nenhum prompt de negócio, schema ou
+Output Parser vive dentro do n8n. O app manda
+`{"prompt", "formato", "chaves_obrigatorias"}` e os nós "JSON ..." usam
+essas chaves pra validar — todo o texto do prompt (`config/prompts.py`) e
+a interpretação da resposta ficam no Python, versionados e testados. As
+chains leem o prompt direto do Webhook (e não de `$json`), porque quando
+uma chain é chamada pela saída de erro de um nó "JSON ...", o item que
+chega é a resposta ruim da IA anterior, sem o pedido original.
 
 Com esse modo, a visão "o que deu certo, o que falhou, qual IA pegou a
 tarefa, quando, com que erro" vem de graça pela aba **Executions** do
@@ -141,11 +153,43 @@ sem precisar de nenhum log adicional dentro do Study Assistant.
 `[n8n].webhook_url` vazio (ou a seção toda fora) e preencha as seções
 `[ai.openai]`, `[ai.gemini]`, `[ai.groq_primary]`, `[ai.groq_secondary]`
 e `[ai.mistral]` com suas chaves de API — não precisa configurar as
-cinco, o app usa só as que tiverem `api_key` preenchida, na mesma ordem.
-Nesse modo o fallback entre provedores acontece dentro do próprio
-Python (`AIProviderCascade`), e as tentativas ficam disponíveis na
-sessão (expander "Como cada IA respondeu" na tela de resultado), mas
-não em nenhum painel de execuções.
+cinco, o app usa só as que tiverem `api_key` preenchida, nessa ordem
+(OpenAI → Gemini → Groq → Groq → Mistral). Nesse modo o fallback entre
+provedores acontece dentro do próprio Python (`AIProviderCascade`), com a
+mesma regra dos nós "JSON ..." do n8n (resposta sem as chaves pedidas vai
+pro próximo provedor), e as tentativas ficam disponíveis na sessão
+(expander "Detalhes técnicos da geração" na tela de resultado), mas não
+em nenhum painel de execuções.
+
+### 2.2. Análise em lotes
+
+As IAs gratuitas da cascata têm teto de tokens **por minuto** (Groq:
+8.000), e mandar o material inteiro numa chamada só estourava esse teto.
+Por isso, igual ao qa_testgen, a análise é feita em lotes:
+
+- cada material é dividido em lotes de até 12 mil caracteres, sempre
+  cortando entre parágrafos (`application/text_batches.py`);
+- entre uma chamada e outra o app espera o tempo proporcional ao tamanho
+  do que foi enviado (de 5s a 30s); se uma chamada falha, espera 62s e
+  tenta o mesmo lote de novo, até 3 vezes (`application/ai_caller.py`);
+- o resultado continua sendo **uma** análise num PDF só: a seção de cada
+  material traz as partes em ordem ("Parte 2 de 4 — título"), e as seções
+  de referências, dicas, desafio e síntese são escritas a partir de um
+  resumo curto de cada lote.
+
+**Nada se perde e nada é pedido duas vezes:** cada resposta da IA é
+gravada no Turso (`sa_ai_respostas`) assim que chega. Se um lote falhar as
+3 vezes, a análise **pausa** (nunca sai com parte faltando) e o botão vira
+**▶️ Continuar análise** — ao continuar, ou ao subir os mesmos arquivos de
+novo (até dias depois, mesmo com o navegador fechado ou o servidor
+reiniciado), o que já tinha resposta volta do banco sem chamar a IA. Essas
+respostas são temporárias: somem sozinhas depois de 7 dias.
+
+Os limites são ajustáveis em `[analysis]` no `secrets.toml` (ver
+`.streamlit/secrets.toml.example`): `max_total_chars` (padrão 120 mil
+caracteres por análise, somando os materiais — o que passar disso é
+avisado no fim da seção do material), `batch_chars` e
+`saved_responses_days`.
 
 ### 3. Criar as tabelas no Turso
 
@@ -154,8 +198,10 @@ python scripts/init_database.py
 ```
 
 Idempotente (`CREATE TABLE IF NOT EXISTS`) — pode rodar de novo sem medo.
-Só cria as tabelas do histórico de sessões salvas — o login do admin não
-mora no Turso (ver passo 4).
+Cria as tabelas do histórico de sessões salvas e a `sa_ai_respostas`
+(respostas da IA guardadas por alguns dias pra análise em lotes poder
+pausar e continuar — o app também cria essa sozinho no primeiro uso, se
+faltar). O login do admin não mora no Turso (ver passo 4).
 
 ### 4. Criar seu usuário administrador
 
@@ -188,11 +234,13 @@ streamlit run app.py
    viram texto puro.
 3. **Extração das 3 seções da apostila**
    (`application/extraction_service.py`) — primeiro tenta achar por
-   cabeçalhos comuns (rápido, sem custo de IA); se não achar, pede pra IA
-   extrair só aquele trecho.
-4. **Análise completa** (`application/analysis_service.py`) — um único
-   prompt de negócio (`config/prompts.py`) é enviado à cascata de IA, que
-   tenta cada provedor em ordem até um responder.
+   cabeçalhos comuns (rápido, sem custo de IA); o que não achar, a IA
+   procura na apostila lote a lote, com uma chamada por lote pedindo
+   todas as seções que faltam de uma vez.
+4. **Análise em lotes** (`application/analysis_service.py`) — uma chamada
+   por lote de cada material e mais 4 pequenas para referências, dicas,
+   desafio e síntese (ver "Análise em lotes" no Setup). A tela mostra em
+   que etapa está, as esperas e o que já ficou pronto.
 5. **Relatório** (`infrastructure/report_generators/`) — o mesmo
    resultado é renderizado em docx/pdf/txt/csv, todos a partir de um
    "esboço" comum (`report_content.py`) pra evitar duplicar a lógica de
@@ -218,6 +266,14 @@ streamlit run app.py
   memória, no processo do Streamlit — reinicia se o servidor reiniciar.
   Suficiente para um app pessoal de usuário único; não seria adequado com
   múltiplas réplicas do servidor.
+- A análise em lotes é mais lenta que uma chamada só: um material de uns
+  75 mil caracteres vira ~15 chamadas, com ~5 minutos só de espera entre
+  elas (pra não estourar a cota por minuto), fora o tempo de resposta das
+  IAs. A espera é calculada pelo provedor mais apertado (Groq), mesmo
+  quando quem responde é o Gemini.
+- No PDF salvo no histórico, o título impresso dentro do arquivo é o da
+  hora em que foi salvo — renomear a sessão muda o título da lista e o
+  nome do arquivo baixado, não o conteúdo do PDF.
 
 ## Testes
 
@@ -241,9 +297,11 @@ Turso.
 
 Nenhum outro arquivo precisa mudar.
 
-**Modo n8n:** adicione o novo elo (Chat Model + Chain) direto no
-workflow (`n8n/study_assistant_ai_cascade.json` ou na versão já
-importada na sua instância), ligando a saída de erro do último elo
-atual nele e a dele em "Responder Sucesso"/no próximo elo — nenhum
-código Python precisa mudar, já que o app só enxerga o webhook como um
-único provedor.
+**Modo n8n:** adicione o novo elo direto no workflow
+(`n8n/study_assistant_ai_cascade.json` ou na versão já importada na sua
+instância), com as mesmas 5 peças dos outros: Chat Model, Chain (prompt
+lido do Webhook), "JSON ..." (copie o código de um existente),
+"Erro 5xx?" e "Aguardar 5s". Ligue nele as saídas de falha do último elo
+atual (a de erro do "JSON ..." e a "falso" do "Erro 5xx?") e as dele em
+"Responder Sucesso"/no próximo elo — nenhum código Python precisa mudar,
+já que o app só enxerga o webhook como um único provedor.

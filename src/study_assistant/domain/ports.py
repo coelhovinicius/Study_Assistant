@@ -14,7 +14,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Literal
 
-from study_assistant.domain.entities import AdminUser, StudySession
+from study_assistant.domain.entities import AdminUser, SavedAIResponse, StudySession
 
 ResponseFormat = Literal["text", "json"]
 
@@ -50,12 +50,23 @@ class AIProvider(ABC):
         """Nome curto e estável do provedor, usado em logs e no relatório final."""
 
     @abstractmethod
-    def generate(self, prompt: str, *, response_format: ResponseFormat = "text") -> str:
+    def generate(
+        self,
+        prompt: str,
+        *,
+        response_format: ResponseFormat = "text",
+        required_keys: tuple[str, ...] = (),
+    ) -> str:
         """Envia o prompt e retorna o texto de resposta gerado.
 
         Quando ``response_format="json"``, a implementação deve instruir o
         modelo a responder apenas com JSON válido; a validação/parse do
         JSON é responsabilidade de quem chama, não do provedor.
+
+        ``required_keys``: chaves que o objeto JSON da resposta precisa ter.
+        O provedor do n8n repassa isso pro workflow, que valida e já tenta a
+        próxima IA quando falta alguma; os de chat completion ignoram (quem
+        confere, nesse modo, é a cascata em Python).
 
         Deve levantar ``AIProviderError`` em qualquer falha (rede,
         autenticação, limite de uso, resposta vazia, etc.), nunca deixar
@@ -119,6 +130,23 @@ class SessionRepository(ABC):
 
     @abstractmethod
     def delete(self, session_id: str) -> None: ...
+
+
+class AIResponseStore(ABC):
+    """Respostas de IA já recebidas, guardadas por uma "impressão digital"
+    do pedido exato (prompt + chaves pedidas). É o que permite pausar uma
+    análise no meio e continuar depois sem mandar de novo pra IA o que ela
+    já respondeu — mesmo com o navegador fechado ou o servidor reiniciado.
+    Temporário: cada resposta vale só por alguns dias (``purge_older_than``)."""
+
+    @abstractmethod
+    def get(self, key: str) -> SavedAIResponse | None: ...
+
+    @abstractmethod
+    def save(self, key: str, response: SavedAIResponse) -> None: ...
+
+    @abstractmethod
+    def purge_older_than(self, days: int) -> None: ...
 
 
 class ReportGenerator(ABC):

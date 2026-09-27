@@ -59,3 +59,17 @@ class ReportGenerationError(StudyAssistantError):
 
 class RepositoryError(StudyAssistantError):
     """Erro de persistência (Turso/banco de dados)."""
+
+
+class AnalysisPausedError(StudyAssistantError):
+    """Um lote da análise falhou mesmo depois de todas as retentativas.
+
+    A análise PAUSA em vez de terminar com um buraco: tudo o que a IA já
+    respondeu fica salvo (ver ``ResilientAICaller``), então continuar
+    retoma deste lote, sem mandar de novo o que já foi analisado."""
+
+    def __init__(self, step_label: str, cause: str, detail: str) -> None:
+        self.step_label = step_label
+        self.cause = cause
+        self.detail = detail
+        super().__init__(f"Análise pausada em {step_label}: {cause or detail}")

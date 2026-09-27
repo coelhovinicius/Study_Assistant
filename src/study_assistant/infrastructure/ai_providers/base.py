@@ -34,14 +34,20 @@ class BaseAIProvider(AIProvider):
     def model(self) -> str:
         return self._model
 
-    def generate(self, prompt: str, *, response_format: ResponseFormat = "text") -> str:
+    def generate(
+        self,
+        prompt: str,
+        *,
+        response_format: ResponseFormat = "text",
+        required_keys: tuple[str, ...] = (),
+    ) -> str:
         full_prompt = prompt
         if response_format == "json":
             full_prompt = prompt + _JSON_INSTRUCTION
 
         start = time.monotonic()
         try:
-            raw_text = self._call_api(full_prompt)
+            raw_text = self._send(full_prompt, response_format=response_format, required_keys=required_keys)
         except AIProviderError:
             raise
         except Exception as exc:  # noqa: BLE001 - normaliza qualquer erro de SDK externa
@@ -53,6 +59,13 @@ class BaseAIProvider(AIProvider):
         if not text:
             raise AIProviderError(self.provider_name, "o modelo retornou uma resposta vazia")
         return text
+
+    def _send(self, prompt: str, *, response_format: ResponseFormat, required_keys: tuple[str, ...]) -> str:
+        """Ponto de extensão: os provedores de chat completion só precisam
+        do prompt (implementam ``_call_api``); o do n8n sobrescreve este
+        método porque repassa o formato e as chaves obrigatórias pro
+        workflow validar a resposta antes de devolver."""
+        return self._call_api(prompt)
 
     def _call_api(self, prompt: str) -> str:  # pragma: no cover - abstrato na prática
         raise NotImplementedError

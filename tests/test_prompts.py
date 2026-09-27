@@ -1,69 +1,78 @@
 """Testes de config/prompts.py.
 
-Cobre a regressão relatada pelo usuário: depois de pedir conteúdo técnico
-mais rico nas referências bibliográficas (item 5), a IA passou a gerar
-SOMENTE a seção de referências e deixar as outras 7 vazias. A causa
-provável foi um item 5 desproporcionalmente longo/enfático em relação aos
-demais, fazendo um modelo mais fraco da cascata "focar" só nele. O reforço
-abaixo garante que o prompt deixe claro que todas as 8 seções continuam
-obrigatórias — sem remover a melhoria pedida no conteúdo das referências.
+Desde a análise em lotes não existe mais o prompt único pedindo as 8
+seções de uma vez (e com ele sumiu a regressão de "a IA preencher só a
+seção de referências e deixar as outras vazias": cada seção final agora é
+uma chamada própria, com uma chave só). O que continua valendo:
+
+* a melhoria pedida pelo usuário nas referências (conteúdo técnico do
+  assunto, não "por que foi indicada") — agora no prompt dedicado a elas;
+* cada prompt pede exatamente as chaves que o workflow do n8n confere.
 """
 
 from __future__ import annotations
 
-from study_assistant.config.prompts import build_analysis_prompt
+from study_assistant.config.prompts import (
+    BATCH_ANALYSIS_KEYS,
+    build_batch_analysis_prompt,
+    build_batch_extraction_prompt,
+    build_challenge_prompt,
+    build_reading_tips_prompt,
+    build_references_prompt,
+    build_synthesis_prompt,
+)
 
 
-def _sample_prompt() -> str:
-    return build_analysis_prompt(materials_context="material X", insights_context="insights Y")
+def _batch_prompt(part_number: int = 2, part_count: int = 4) -> str:
+    return build_batch_analysis_prompt(
+        material_label="Apostila",
+        filename="unidade3.pdf",
+        focus="conceitos-chave",
+        part_number=part_number,
+        part_count=part_count,
+        text="TEXTO DO LOTE",
+    )
 
 
-def test_prompt_ainda_pede_conteudo_tecnico_nas_referencias() -> None:
+def test_prompt_de_referencias_ainda_pede_conteudo_tecnico() -> None:
     """A melhoria pedida pelo usuário (conteúdo técnico, não "por que
     indicada") precisa continuar no prompt — isso é uma ADIÇÃO, não algo a
     reverter."""
-    prompt = _sample_prompt()
+    prompt = build_references_prompt(references_text="MENDES, Gilmar...", topics="- Parte 1")
     assert "conteúdo técnico" in prompt
     assert "por que foi" in prompt
+    assert '"analise_referencias_bibliograficas"' in prompt
 
 
-def test_prompt_reforca_que_todas_as_8_secoes_sao_obrigatorias() -> None:
-    """Reforço adicionado para corrigir a regressão: o modelo não pode
-    parar de gerar as outras 7 seções só porque a instrução de referências
-    ficou mais detalhada."""
-    prompt = _sample_prompt()
-    assert "TODAS elas" in prompt or "todas obrigatórias" in prompt.lower()
-    assert "ERRADA" in prompt
+def test_prompt_do_lote_pede_as_tres_chaves_que_o_n8n_confere() -> None:
+    prompt = _batch_prompt()
+    for key in BATCH_ANALYSIS_KEYS:
+        assert f'"{key}"' in prompt
+    assert "TEXTO DO LOTE" in prompt
 
 
-def test_item_5_nao_e_desproporcionalmente_maior_que_os_outros_itens() -> None:
-    """Raiz da regressão: o item 5 (referências) ficou tão mais longo que
-    os itens 1, 6, 7 e 8 que um provedor mais fraco da cascata passou a
-    tratá-lo como se fosse a única instrução real. Este teste trava um
-    limite de proporção pra evitar que isso volte a acontecer sem que
-    alguém perceba."""
-    prompt = _sample_prompt()
-    lines = prompt.splitlines()
-
-    def _item_block(marker: str, next_marker: str) -> str:
-        start = next(i for i, line in enumerate(lines) if line.strip().startswith(marker))
-        end = next(i for i, line in enumerate(lines) if line.strip().startswith(next_marker))
-        return "\n".join(lines[start:end])
-
-    item5 = _item_block("5.", "6.")
-    item7 = _item_block("7.", "8.")
-
-    # Item 5 pode ser um pouco mais detalhado (é o pedido explícito do
-    # usuário), mas não pode ser vários múltiplos maior que outro item
-    # também "denso" como o 7 (resolução do desafio).
-    assert len(item5) <= len(item7) * 2.5
+def test_prompt_do_lote_diz_qual_parte_esta_sendo_analisada() -> None:
+    assert "parte 2 de 4" in _batch_prompt(2, 4)
+    assert "foi dividido" not in _batch_prompt(1, 1)
 
 
-def test_secao_extraction_prompt_continua_intacta() -> None:
-    """Mudança foi só no prompt de análise expandida — o prompt de
-    fallback de extração de seção não deveria ter sido tocado."""
-    from study_assistant.config.prompts import build_section_extraction_prompt
+def test_prompts_das_secoes_finais_pedem_uma_chave_cada() -> None:
+    assert '"analise_dicas_leitura"' in build_reading_tips_prompt(tips_text="x", topics="y")
+    assert '"analise_e_resolucao_desafio"' in build_challenge_prompt(challenge_text="x", summaries="y")
+    assert '"sintese_geral"' in build_synthesis_prompt(summaries="y")
 
-    prompt = build_section_extraction_prompt(section_label="Referências", apostila_text="texto")
-    assert "encontrado" in prompt
-    assert "conteúdo" in prompt
+
+def test_desafio_continua_pedindo_resolucao_passo_a_passo() -> None:
+    prompt = build_challenge_prompt(challenge_text="Elabore um parecer", summaries="resumos")
+    assert "RESOLVA" in prompt
+    assert "passo a passo" in prompt
+    assert "Elabore um parecer" in prompt
+
+
+def test_prompt_de_extracao_pede_so_as_secoes_que_faltam() -> None:
+    prompt = build_batch_extraction_prompt(
+        sections={"desafio_pratico": "Desafio Prático"}, part_number=1, part_count=3, text="texto"
+    )
+    assert '"desafio_pratico"' in prompt
+    assert "referencias_bibliograficas" not in prompt
+    assert "não invente" in prompt

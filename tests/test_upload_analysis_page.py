@@ -36,6 +36,7 @@ import streamlit as st
 from study_assistant.domain.entities import MaterialType, StudySession
 from study_assistant.domain.exceptions import (
     AllProvidersFailedError,
+    AnalysisPausedError,
     ReportGenerationError,
     RepositoryError,
 )
@@ -60,7 +61,7 @@ def _render_form(monkeypatch, *, title: str, apostila_files: list) -> dict:
 
     def _button(label, *args, **kwargs):
         if kwargs.get("key") == "btn_analyze":
-            captured["analyze_button"] = kwargs
+            captured["analyze_button"] = {"label": label, **kwargs}
         return False
 
     monkeypatch.setattr(st, "text_input", lambda *a, **k: title)
@@ -98,6 +99,15 @@ def test_aviso_lista_titulo_e_apostila_quando_faltam_os_dois(monkeypatch) -> Non
     assert captured["infos"] == [
         "Para habilitar a análise, preencha o título da sessão e envie ao menos um arquivo de Apostila."
     ]
+
+
+def test_botao_vira_continuar_analise_quando_a_analise_esta_pausada(monkeypatch) -> None:
+    st.session_state[page._ANALYSIS_PAUSED_KEY] = True
+
+    captured = _render_form(monkeypatch, title="Direito Constitucional", apostila_files=["apostila.pdf"])
+
+    assert captured["analyze_button"]["label"] == "▶️ Continuar análise"
+    assert captured["analyze_button"]["disabled"] is False
 
 
 def test_analisar_habilitado_com_titulo_e_apostila(monkeypatch) -> None:
@@ -140,6 +150,21 @@ def test_reset_muda_a_key_efetiva_dos_widgets() -> None:
 # --- _do_pipeline_work: a parte pura, sem Streamlit -----------------------
 
 
+def _pipeline_container(
+    *,
+    ingest=lambda files: [],
+    extract=lambda text, progress=None: None,
+    analyze=lambda materials, insights, progress=None: None,
+    persistence_warning=None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        document_service=SimpleNamespace(ingest=ingest),
+        extraction_use_case=SimpleNamespace(execute=extract),
+        analysis_use_case=SimpleNamespace(execute=analyze),
+        ai_caller=SimpleNamespace(purge_expired=lambda: None, persistence_warning=persistence_warning),
+    )
+
+
 def test_do_pipeline_work_encadeia_ingest_extracao_e_analise() -> None:
     calls = []
 
@@ -149,26 +174,37 @@ def test_do_pipeline_work_encadeia_ingest_extracao_e_analise() -> None:
         calls.append(("ingest", files))
         return [fake_material]
 
-    def extract(text):
+    def extract(text, progress=None):
         calls.append(("extract", text))
         return "insights-fake"
 
-    def analyze(materials, insights):
+    def analyze(materials, insights, progress=None):
         calls.append(("analyze", materials, insights))
         return "analysis-fake"
 
-    container = SimpleNamespace(
-        document_service=SimpleNamespace(ingest=ingest),
-        extraction_use_case=SimpleNamespace(execute=extract),
-        analysis_use_case=SimpleNamespace(execute=analyze),
-    )
+    container = _pipeline_container(ingest=ingest, extract=extract, analyze=analyze)
+    container.ai_caller.purge_expired = lambda: calls.append(("purge",))
 
     materials, insights, analysis = page._do_pipeline_work(container, uploaded_files=[])
 
     assert materials == [fake_material]
     assert insights == "insights-fake"
     assert analysis == "analysis-fake"
-    assert [c[0] for c in calls] == ["ingest", "extract", "analyze"]
+    # Respostas de IA antigas são limpas antes de qualquer chamada à IA.
+    assert [c[0] for c in calls] == ["ingest", "purge", "extract", "analyze"]
+
+
+def test_do_pipeline_work_repassa_o_progresso_para_a_extracao_e_a_analise() -> None:
+    received = []
+    progress = object()
+    container = _pipeline_container(
+        extract=lambda text, progress=None: received.append(progress),
+        analyze=lambda materials, insights, progress=None: received.append(progress),
+    )
+
+    page._do_pipeline_work(container, uploaded_files=[], progress=progress)
+
+    assert received == [progress, progress]
 
 
 # --- _run_analysis: execução síncrona + tratamento de erro ---------------
@@ -177,10 +213,10 @@ def test_do_pipeline_work_encadeia_ingest_extracao_e_analise() -> None:
 def test_run_analysis_com_sucesso_cria_a_sessao_e_desliga_o_flag() -> None:
     fake_material = SimpleNamespace(material_type=MaterialType.APOSTILA, raw_text="texto")
 
-    container = SimpleNamespace(
-        document_service=SimpleNamespace(ingest=lambda files: [fake_material]),
-        extraction_use_case=SimpleNamespace(execute=lambda text: "insights"),
-        analysis_use_case=SimpleNamespace(execute=lambda materials, insights: "analysis"),
+    container = _pipeline_container(
+        ingest=lambda files: [fake_material],
+        extract=lambda text, progress=None: "insights",
+        analyze=lambda materials, insights, progress=None: "analysis",
     )
     st.session_state[page._IS_ANALYZING_KEY] = True
 
@@ -202,14 +238,10 @@ def test_run_analysis_com_sucesso_cria_a_sessao_e_desliga_o_flag() -> None:
 
 
 def test_run_analysis_com_erro_de_negocio_guarda_aviso_sem_criar_sessao() -> None:
-    def falha(materials, insights):
+    def falha(materials, insights, progress=None):
         raise AllProvidersFailedError("todos os provedores falharam")
 
-    container = SimpleNamespace(
-        document_service=SimpleNamespace(ingest=lambda files: []),
-        extraction_use_case=SimpleNamespace(execute=lambda text: None),
-        analysis_use_case=SimpleNamespace(execute=falha),
-    )
+    container = _pipeline_container(analyze=falha)
     st.session_state[page._IS_ANALYZING_KEY] = True
 
     page._run_analysis(
@@ -229,14 +261,10 @@ def test_run_analysis_com_erro_inesperado_deixa_estourar_mas_desliga_o_flag() ->
     de "algo deu errado" que esconderia o problema real — mas o flag
     ``is_analyzing`` ainda precisa ser desligado antes, senão a tela fica
     "ocupada" pra sempre depois que o usuário recarregar a página."""
-    def bug(materials, insights):
+    def bug(materials, insights, progress=None):
         raise RuntimeError("bug inesperado")
 
-    container = SimpleNamespace(
-        document_service=SimpleNamespace(ingest=lambda files: []),
-        extraction_use_case=SimpleNamespace(execute=lambda text: None),
-        analysis_use_case=SimpleNamespace(execute=bug),
-    )
+    container = _pipeline_container(analyze=bug)
     st.session_state[page._IS_ANALYZING_KEY] = True
 
     with pytest.raises(RuntimeError, match="bug inesperado"):
@@ -245,6 +273,61 @@ def test_run_analysis_com_erro_inesperado_deixa_estourar_mas_desliga_o_flag() ->
         )
 
     assert st.session_state[page._IS_ANALYZING_KEY] is False
+
+
+# --- análise pausada: nada se perde, continuar retoma de onde parou -------
+
+
+def _run(container) -> None:
+    page._run_analysis(
+        container, title="t", apostila_files=[], livro_files=[], podcast_files=[], outros_files=[]
+    )
+
+
+def test_lote_que_falhou_pausa_a_analise_com_o_motivo_e_sem_resultado_pela_metade() -> None:
+    def pausa(materials, insights, progress=None):
+        raise AnalysisPausedError(
+            "Etapa 3 de 8: Apostila, parte 3 de 4",
+            "A cota por minuto da IA gratuita estourou.",
+            "Request too large ... tokens per minute",
+        )
+
+    st.session_state[page._IS_ANALYZING_KEY] = True
+
+    _run(_pipeline_container(analyze=pausa))
+
+    assert st.session_state[page._IS_ANALYZING_KEY] is False
+    assert st.session_state[page._ANALYSIS_PAUSED_KEY] is True
+    assert page._SESSION_STATE_KEY not in st.session_state  # nunca um resultado com buraco
+    notice = st.session_state[page._ANALYSIS_NOTICE_KEY]
+    assert notice["kind"] == "paused"
+    assert "Apostila, parte 3 de 4" in notice["message"]
+    assert "cota por minuto" in notice["message"]
+    assert "Continuar análise" in notice["message"]
+    assert "tokens per minute" in notice["detail"]
+
+
+def test_continuar_ate_o_fim_tira_a_analise_do_estado_pausado() -> None:
+    st.session_state[page._ANALYSIS_PAUSED_KEY] = True
+    st.session_state[page._IS_ANALYZING_KEY] = True
+
+    _run(_pipeline_container(analyze=lambda materials, insights, progress=None: "analysis"))
+
+    assert page._ANALYSIS_PAUSED_KEY not in st.session_state
+    assert st.session_state[page._ANALYSIS_NOTICE_KEY]["kind"] == "success"
+
+
+def test_aviso_de_progresso_nao_salvo_no_banco_aparece_na_mensagem_final() -> None:
+    container = _pipeline_container(
+        analyze=lambda materials, insights, progress=None: "analysis",
+        persistence_warning="Não foi possível salvar o progresso no banco (Turso) agora.",
+    )
+    st.session_state[page._IS_ANALYZING_KEY] = True
+
+    _run(container)
+
+    assert "Turso" in st.session_state[page._ANALYSIS_NOTICE_KEY]["message"]
+    assert container.ai_caller.persistence_warning is None  # avisa uma vez só
 
 
 # --- _render_result: salvar/descartar, incluindo o aviso pós-rerun -------

@@ -9,66 +9,507 @@
         "responseMode": "responseNode",
         "options": {}
       },
-      "id": "8d44741e-a3fc-4de5-bb36-2c4fe32cdc61",
+      "id": "4ceb9cc8-6c53-433a-be0e-aebd6a031c89",
       "name": "Webhook - Cascata IA",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 1.1,
       "position": [
-        -1600,
-        400
+        -2000,
+        240
       ],
       "webhookId": "55196474-1be1-4230-91dd-6439447d2a91",
       "credentials": {
         "httpHeaderAuth": {
-          "id": "VCDmXunueUpMXjJh",
-          "name": "Header Auth account 4"
+          "id": "yaweqmyGwDpWT5tC",
+          "name": "Header Auth account 5"
         }
       }
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ $json }}",
+        "responseBody": "={{ $json.output ?? $json }}",
         "options": {}
       },
-      "id": "4e404444-8889-46eb-a91a-5350c0d2901e",
+      "id": "0cbd3790-6120-4400-a6f3-03a48fa8d1a7",
       "name": "Responder Sucesso",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
       "position": [
-        400,
-        400
+        1000,
+        -260
       ]
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ { \"error\": \"Todos os provedores de IA falharam (OpenAI, Gemini, Groq, Groq 2, Mistral).\", \"detalhe\": $json.error?.message ?? $json.message ?? \"erro desconhecido\" } }}",
+        "responseBody": "={{ { \"error\": \"Todos os provedores de IA falharam (Gemini, Groq, Groq 2, Mistral, OpenAI, Groq 3).\", \"detalhe\": $json.error?.message ?? $json.error ?? $json.message ?? \"erro desconhecido\" } }}",
         "options": {
           "responseCode": 502
         }
       },
-      "id": "38ca73ae-6912-4291-be8e-5c07004a8ee6",
+      "id": "ae4c79ac-b12a-42b5-a188-a356cd2aa6f9",
       "name": "Responder Erro",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
       "position": [
-        400,
-        700
+        1000,
+        760
       ]
     },
     {
       "parameters": {
         "promptType": "define",
-        "text": "={{ $json.body.prompt }}"
+        "text": "={{ $('Webhook - Cascata IA').first().json.body.prompt }}"
       },
-      "id": "6bedbb2b-feb3-4e78-9622-1511d512aa3b",
+      "id": "81060261-4bd3-405d-b085-cc5f85440ba2",
+      "name": "Gemini Chain",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [
+        -1600,
+        240
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "options": {
+          "maxOutputTokens": 32000
+        }
+      },
+      "id": "fd5d8795-ead9-4794-9ea5-3520518f6244",
+      "name": "Google Gemini",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        -1600,
+        460
+      ],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "AbTZUtCZlIUnulL4",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extrai e valida o JSON da resposta da IA sem o Structured Output Parser (que derruba a\n// chain com \"Model output doesn't fit required format\" à menor sujeira) — mesma lógica do\n// Doc_QA_Generation_HA, só que genérica: o formato e as chaves obrigatórias vêm do próprio\n// pedido do Study Assistant (body.formato / body.chaves_obrigatorias). Se não der, o erro\n// vai pra saída de erro deste nó -> próximo provedor da cascata.\nconst pedido = $('Webhook - Cascata IA').first().json.body || {};\nconst OBRIGATORIAS = Array.isArray(pedido.chaves_obrigatorias) ? pedido.chaves_obrigatorias : [];\nconst bruto = $input.first().json;\nlet texto = bruto.output ?? bruto.text ?? bruto;\nif (typeof texto !== 'string') texto = JSON.stringify(texto);\n\nif (pedido.formato !== 'json') {\n  if (!String(texto).trim()) throw new Error('A IA devolveu uma resposta vazia.');\n  return [{ json: { output: { text: texto } } }];\n}\n\nfunction tentar(s) { try { return JSON.parse(s); } catch (e) { return null; } }\n\nlet obj = tentar(texto);\nif (!obj) {\n  const cerca = texto.match(/```(?:json)?\\s*([\\s\\S]*?)```/i);\n  if (cerca) obj = tentar(cerca[1]);\n}\nif (!obj) {\n  const i = texto.indexOf('{'), j = texto.lastIndexOf('}');\n  if (i >= 0 && j > i) {\n    const miolo = texto.slice(i, j + 1);\n    obj = tentar(miolo) || tentar(miolo.replace(/,\\s*([}\\]])/g, '$1'));\n  }\n}\nif (obj && obj.output && typeof obj.output === 'object' && !OBRIGATORIAS.some(k => k in obj)) obj = obj.output;\nif (!obj || typeof obj !== 'object' || Array.isArray(obj)) {\n  throw new Error('Resposta da IA não é um objeto JSON válido. Início: ' + String(texto).slice(0, 300));\n}\nconst faltam = OBRIGATORIAS.filter(k => !(k in obj));\nif (faltam.length) {\n  throw new Error('JSON sem as chaves obrigatórias: ' + faltam.join(', ') + ' (veio: ' + Object.keys(obj).join(', ') + ')');\n}\nreturn [{ json: { output: obj } }];"
+      },
+      "id": "6b7374c3-fc04-41c8-a1cb-5193eeabc2a0",
+      "name": "JSON Gemini Chain",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1400,
+        20
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "fae2d81c-b0a3-4b2c-a7e4-4e5aa6a484a5",
+              "leftValue": "={{ /(^|[^0-9])(500|502|503|504|529)([^0-9]|$)|service unavailable|unavailable_error|overloaded|over capacity|high demand|internal (server )?error|bad gateway|gateway time-?out|temporarily unavailable|try again later/i.test(JSON.stringify($json.error ?? $json.message ?? '')) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "deb806e1-0806-425d-98fd-f2d03cd1cb10",
+              "leftValue": "={{ $runIndex }}",
+              "rightValue": 2,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "d0188ca0-6f41-46c2-a180-d7b64ebf0774",
+      "name": "Erro 5xx? (Gemini Chain)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1400,
+        680
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 5,
+        "unit": "seconds"
+      },
+      "id": "7327354c-cda8-44c3-8078-714c4b94425d",
+      "name": "Aguardar 5s (Gemini Chain)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -1400,
+        900
+      ],
+      "webhookId": "98140cb5-c7be-4c24-ab03-70a394afeb63"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Webhook - Cascata IA').first().json.body.prompt }}"
+      },
+      "id": "d0705024-6f8e-44aa-911e-b87410a78c4b",
+      "name": "Groq Chain",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [
+        -1180,
+        240
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-120b",
+        "options": {
+          "maxTokensToSample": 6000,
+          "temperature": 0.2
+        }
+      },
+      "id": "cad3059c-9a35-4001-af59-41dab77c2079",
+      "name": "Groq Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        -1180,
+        460
+      ],
+      "credentials": {
+        "groqApi": {
+          "id": "w1DzJ09lU56BjXqQ",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extrai e valida o JSON da resposta da IA sem o Structured Output Parser (que derruba a\n// chain com \"Model output doesn't fit required format\" à menor sujeira) — mesma lógica do\n// Doc_QA_Generation_HA, só que genérica: o formato e as chaves obrigatórias vêm do próprio\n// pedido do Study Assistant (body.formato / body.chaves_obrigatorias). Se não der, o erro\n// vai pra saída de erro deste nó -> próximo provedor da cascata.\nconst pedido = $('Webhook - Cascata IA').first().json.body || {};\nconst OBRIGATORIAS = Array.isArray(pedido.chaves_obrigatorias) ? pedido.chaves_obrigatorias : [];\nconst bruto = $input.first().json;\nlet texto = bruto.output ?? bruto.text ?? bruto;\nif (typeof texto !== 'string') texto = JSON.stringify(texto);\n\nif (pedido.formato !== 'json') {\n  if (!String(texto).trim()) throw new Error('A IA devolveu uma resposta vazia.');\n  return [{ json: { output: { text: texto } } }];\n}\n\nfunction tentar(s) { try { return JSON.parse(s); } catch (e) { return null; } }\n\nlet obj = tentar(texto);\nif (!obj) {\n  const cerca = texto.match(/```(?:json)?\\s*([\\s\\S]*?)```/i);\n  if (cerca) obj = tentar(cerca[1]);\n}\nif (!obj) {\n  const i = texto.indexOf('{'), j = texto.lastIndexOf('}');\n  if (i >= 0 && j > i) {\n    const miolo = texto.slice(i, j + 1);\n    obj = tentar(miolo) || tentar(miolo.replace(/,\\s*([}\\]])/g, '$1'));\n  }\n}\nif (obj && obj.output && typeof obj.output === 'object' && !OBRIGATORIAS.some(k => k in obj)) obj = obj.output;\nif (!obj || typeof obj !== 'object' || Array.isArray(obj)) {\n  throw new Error('Resposta da IA não é um objeto JSON válido. Início: ' + String(texto).slice(0, 300));\n}\nconst faltam = OBRIGATORIAS.filter(k => !(k in obj));\nif (faltam.length) {\n  throw new Error('JSON sem as chaves obrigatórias: ' + faltam.join(', ') + ' (veio: ' + Object.keys(obj).join(', ') + ')');\n}\nreturn [{ json: { output: obj } }];"
+      },
+      "id": "679b47c7-62c3-45e4-be10-57ef1c5f860d",
+      "name": "JSON Groq Chain",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -980,
+        20
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "25f8b913-6b89-4dfc-9730-8fd43ff421cd",
+              "leftValue": "={{ /(^|[^0-9])(500|502|503|504|529)([^0-9]|$)|service unavailable|unavailable_error|overloaded|over capacity|high demand|internal (server )?error|bad gateway|gateway time-?out|temporarily unavailable|try again later/i.test(JSON.stringify($json.error ?? $json.message ?? '')) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "4cc97d33-4106-4637-b1bd-cd6c72f43bd1",
+              "leftValue": "={{ $runIndex }}",
+              "rightValue": 2,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "dffcebbf-57e3-48bc-975c-14322441b497",
+      "name": "Erro 5xx? (Groq Chain)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -980,
+        680
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 5,
+        "unit": "seconds"
+      },
+      "id": "47c077a8-9fbf-4fd2-8b47-4c9ede297ee8",
+      "name": "Aguardar 5s (Groq Chain)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -980,
+        900
+      ],
+      "webhookId": "fcec8e57-a30a-4c48-bf60-3b800d57fe25"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Webhook - Cascata IA').first().json.body.prompt }}"
+      },
+      "id": "0379a75d-24bb-45f8-803b-36496ca6741d",
+      "name": "Groq Chain1",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [
+        -760,
+        240
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-120b",
+        "options": {
+          "maxTokensToSample": 6000,
+          "temperature": 0.2
+        }
+      },
+      "id": "0302ba09-8ba2-4800-8924-91d44d295715",
+      "name": "Groq Model1",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        -760,
+        460
+      ],
+      "credentials": {
+        "groqApi": {
+          "id": "zbYe35SnbFEOa8Ow",
+          "name": "Groq account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extrai e valida o JSON da resposta da IA sem o Structured Output Parser (que derruba a\n// chain com \"Model output doesn't fit required format\" à menor sujeira) — mesma lógica do\n// Doc_QA_Generation_HA, só que genérica: o formato e as chaves obrigatórias vêm do próprio\n// pedido do Study Assistant (body.formato / body.chaves_obrigatorias). Se não der, o erro\n// vai pra saída de erro deste nó -> próximo provedor da cascata.\nconst pedido = $('Webhook - Cascata IA').first().json.body || {};\nconst OBRIGATORIAS = Array.isArray(pedido.chaves_obrigatorias) ? pedido.chaves_obrigatorias : [];\nconst bruto = $input.first().json;\nlet texto = bruto.output ?? bruto.text ?? bruto;\nif (typeof texto !== 'string') texto = JSON.stringify(texto);\n\nif (pedido.formato !== 'json') {\n  if (!String(texto).trim()) throw new Error('A IA devolveu uma resposta vazia.');\n  return [{ json: { output: { text: texto } } }];\n}\n\nfunction tentar(s) { try { return JSON.parse(s); } catch (e) { return null; } }\n\nlet obj = tentar(texto);\nif (!obj) {\n  const cerca = texto.match(/```(?:json)?\\s*([\\s\\S]*?)```/i);\n  if (cerca) obj = tentar(cerca[1]);\n}\nif (!obj) {\n  const i = texto.indexOf('{'), j = texto.lastIndexOf('}');\n  if (i >= 0 && j > i) {\n    const miolo = texto.slice(i, j + 1);\n    obj = tentar(miolo) || tentar(miolo.replace(/,\\s*([}\\]])/g, '$1'));\n  }\n}\nif (obj && obj.output && typeof obj.output === 'object' && !OBRIGATORIAS.some(k => k in obj)) obj = obj.output;\nif (!obj || typeof obj !== 'object' || Array.isArray(obj)) {\n  throw new Error('Resposta da IA não é um objeto JSON válido. Início: ' + String(texto).slice(0, 300));\n}\nconst faltam = OBRIGATORIAS.filter(k => !(k in obj));\nif (faltam.length) {\n  throw new Error('JSON sem as chaves obrigatórias: ' + faltam.join(', ') + ' (veio: ' + Object.keys(obj).join(', ') + ')');\n}\nreturn [{ json: { output: obj } }];"
+      },
+      "id": "27f75d51-002f-4d40-9f19-fbb70e8829c0",
+      "name": "JSON Groq Chain1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -560,
+        20
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e4d6e2b8-232e-467c-b57d-db2e2c41511a",
+              "leftValue": "={{ /(^|[^0-9])(500|502|503|504|529)([^0-9]|$)|service unavailable|unavailable_error|overloaded|over capacity|high demand|internal (server )?error|bad gateway|gateway time-?out|temporarily unavailable|try again later/i.test(JSON.stringify($json.error ?? $json.message ?? '')) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "a6483397-957c-4d8b-ada7-4f2ebdb8bbe0",
+              "leftValue": "={{ $runIndex }}",
+              "rightValue": 2,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "86cbad95-5b5b-4083-945c-6ee2b1f4e009",
+      "name": "Erro 5xx? (Groq Chain1)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -560,
+        680
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 5,
+        "unit": "seconds"
+      },
+      "id": "4aa4b0d7-acef-44a8-b533-9a8b7ec09bb0",
+      "name": "Aguardar 5s (Groq Chain1)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -560,
+        900
+      ],
+      "webhookId": "d6f562f9-6465-4d69-b5a9-2329d96e847a"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Webhook - Cascata IA').first().json.body.prompt }}"
+      },
+      "id": "489786f2-7ea6-47d8-b6c6-f8343f943598",
+      "name": "Mistral Chain",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [
+        -340,
+        240
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "model": "mistral-small-latest",
+        "options": {
+          "maxRetries": 0
+        }
+      },
+      "id": "8ade9e50-9165-4635-bf39-7b34a47626ae",
+      "name": "Mistral Cloud Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatMistralCloud",
+      "typeVersion": 1,
+      "position": [
+        -340,
+        460
+      ],
+      "credentials": {
+        "mistralCloudApi": {
+          "id": "9GL9zjvyT2pOocwb",
+          "name": "Mistral Cloud account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extrai e valida o JSON da resposta da IA sem o Structured Output Parser (que derruba a\n// chain com \"Model output doesn't fit required format\" à menor sujeira) — mesma lógica do\n// Doc_QA_Generation_HA, só que genérica: o formato e as chaves obrigatórias vêm do próprio\n// pedido do Study Assistant (body.formato / body.chaves_obrigatorias). Se não der, o erro\n// vai pra saída de erro deste nó -> próximo provedor da cascata.\nconst pedido = $('Webhook - Cascata IA').first().json.body || {};\nconst OBRIGATORIAS = Array.isArray(pedido.chaves_obrigatorias) ? pedido.chaves_obrigatorias : [];\nconst bruto = $input.first().json;\nlet texto = bruto.output ?? bruto.text ?? bruto;\nif (typeof texto !== 'string') texto = JSON.stringify(texto);\n\nif (pedido.formato !== 'json') {\n  if (!String(texto).trim()) throw new Error('A IA devolveu uma resposta vazia.');\n  return [{ json: { output: { text: texto } } }];\n}\n\nfunction tentar(s) { try { return JSON.parse(s); } catch (e) { return null; } }\n\nlet obj = tentar(texto);\nif (!obj) {\n  const cerca = texto.match(/```(?:json)?\\s*([\\s\\S]*?)```/i);\n  if (cerca) obj = tentar(cerca[1]);\n}\nif (!obj) {\n  const i = texto.indexOf('{'), j = texto.lastIndexOf('}');\n  if (i >= 0 && j > i) {\n    const miolo = texto.slice(i, j + 1);\n    obj = tentar(miolo) || tentar(miolo.replace(/,\\s*([}\\]])/g, '$1'));\n  }\n}\nif (obj && obj.output && typeof obj.output === 'object' && !OBRIGATORIAS.some(k => k in obj)) obj = obj.output;\nif (!obj || typeof obj !== 'object' || Array.isArray(obj)) {\n  throw new Error('Resposta da IA não é um objeto JSON válido. Início: ' + String(texto).slice(0, 300));\n}\nconst faltam = OBRIGATORIAS.filter(k => !(k in obj));\nif (faltam.length) {\n  throw new Error('JSON sem as chaves obrigatórias: ' + faltam.join(', ') + ' (veio: ' + Object.keys(obj).join(', ') + ')');\n}\nreturn [{ json: { output: obj } }];"
+      },
+      "id": "ee496075-29e5-4b53-a5ae-bbd1d29f9405",
+      "name": "JSON Mistral Chain",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -140,
+        20
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "049a0a04-b981-45a0-b3f9-3bc246388e3f",
+              "leftValue": "={{ /(^|[^0-9])(500|502|503|504|529)([^0-9]|$)|service unavailable|unavailable_error|overloaded|over capacity|high demand|internal (server )?error|bad gateway|gateway time-?out|temporarily unavailable|try again later/i.test(JSON.stringify($json.error ?? $json.message ?? '')) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "fc94d98b-6398-4b28-8727-1c399ca52250",
+              "leftValue": "={{ $runIndex }}",
+              "rightValue": 2,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "20d1b250-3857-4747-a99e-db9bcd8cc18e",
+      "name": "Erro 5xx? (Mistral Chain)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -140,
+        680
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 5,
+        "unit": "seconds"
+      },
+      "id": "bbee4533-69c1-4511-afef-f66e3f6674f0",
+      "name": "Aguardar 5s (Mistral Chain)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -140,
+        900
+      ],
+      "webhookId": "72557037-8561-4ed7-afcf-09495e5414a7"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Webhook - Cascata IA').first().json.body.prompt }}"
+      },
+      "id": "a304986a-8eb3-4fca-b0a0-18f386c62a5f",
       "name": "OpenAI Chain",
       "type": "@n8n/n8n-nodes-langchain.chainLlm",
       "typeVersion": 1.4,
       "position": [
-        -1200,
-        400
+        80,
+        240
       ],
       "onError": "continueErrorOutput"
     },
@@ -81,15 +522,18 @@
           "cachedResultName": "gpt-5.5"
         },
         "builtInTools": {},
-        "options": {}
+        "options": {
+          "timeout": 120000,
+          "maxRetries": 0
+        }
       },
-      "id": "fd50d3c5-2e05-4648-9afd-3d3aaabe9a3a",
+      "id": "bbfe7163-0d9f-458e-ae7a-8d3c7fb15f7c",
       "name": "OpenAI Chat Model",
       "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
       "typeVersion": 1.3,
       "position": [
-        -1200,
-        600
+        80,
+        460
       ],
       "credentials": {
         "openAiApi": {
@@ -100,150 +544,197 @@
     },
     {
       "parameters": {
-        "promptType": "define",
-        "text": "={{ $json.body.prompt }}"
+        "jsCode": "// Extrai e valida o JSON da resposta da IA sem o Structured Output Parser (que derruba a\n// chain com \"Model output doesn't fit required format\" à menor sujeira) — mesma lógica do\n// Doc_QA_Generation_HA, só que genérica: o formato e as chaves obrigatórias vêm do próprio\n// pedido do Study Assistant (body.formato / body.chaves_obrigatorias). Se não der, o erro\n// vai pra saída de erro deste nó -> próximo provedor da cascata.\nconst pedido = $('Webhook - Cascata IA').first().json.body || {};\nconst OBRIGATORIAS = Array.isArray(pedido.chaves_obrigatorias) ? pedido.chaves_obrigatorias : [];\nconst bruto = $input.first().json;\nlet texto = bruto.output ?? bruto.text ?? bruto;\nif (typeof texto !== 'string') texto = JSON.stringify(texto);\n\nif (pedido.formato !== 'json') {\n  if (!String(texto).trim()) throw new Error('A IA devolveu uma resposta vazia.');\n  return [{ json: { output: { text: texto } } }];\n}\n\nfunction tentar(s) { try { return JSON.parse(s); } catch (e) { return null; } }\n\nlet obj = tentar(texto);\nif (!obj) {\n  const cerca = texto.match(/```(?:json)?\\s*([\\s\\S]*?)```/i);\n  if (cerca) obj = tentar(cerca[1]);\n}\nif (!obj) {\n  const i = texto.indexOf('{'), j = texto.lastIndexOf('}');\n  if (i >= 0 && j > i) {\n    const miolo = texto.slice(i, j + 1);\n    obj = tentar(miolo) || tentar(miolo.replace(/,\\s*([}\\]])/g, '$1'));\n  }\n}\nif (obj && obj.output && typeof obj.output === 'object' && !OBRIGATORIAS.some(k => k in obj)) obj = obj.output;\nif (!obj || typeof obj !== 'object' || Array.isArray(obj)) {\n  throw new Error('Resposta da IA não é um objeto JSON válido. Início: ' + String(texto).slice(0, 300));\n}\nconst faltam = OBRIGATORIAS.filter(k => !(k in obj));\nif (faltam.length) {\n  throw new Error('JSON sem as chaves obrigatórias: ' + faltam.join(', ') + ' (veio: ' + Object.keys(obj).join(', ') + ')');\n}\nreturn [{ json: { output: obj } }];"
       },
-      "id": "eabee291-f06e-4dd7-baad-b341bf381a06",
-      "name": "Gemini Chain",
-      "type": "@n8n/n8n-nodes-langchain.chainLlm",
-      "typeVersion": 1.4,
+      "id": "11422f38-9119-427e-b9aa-27ea7f9f460c",
+      "name": "JSON OpenAI Chain",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
-        -800,
-        400
+        280,
+        20
       ],
       "onError": "continueErrorOutput"
     },
     {
       "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "52403a56-0a54-4ce3-a59c-e8b28ed2b560",
+              "leftValue": "={{ /(^|[^0-9])(500|502|503|504|529)([^0-9]|$)|service unavailable|unavailable_error|overloaded|over capacity|high demand|internal (server )?error|bad gateway|gateway time-?out|temporarily unavailable|try again later/i.test(JSON.stringify($json.error ?? $json.message ?? '')) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "24d282ec-c0f7-47f7-a7ce-1f736c0e18bd",
+              "leftValue": "={{ $runIndex }}",
+              "rightValue": 2,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
         "options": {}
       },
-      "id": "104fc080-0937-4d8e-a22a-cecbc0077fce",
-      "name": "Google Gemini",
-      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
-      "typeVersion": 1,
+      "id": "7aeeb72c-cb30-465d-99d7-186452bc610c",
+      "name": "Erro 5xx? (OpenAI Chain)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
       "position": [
-        -800,
-        600
+        280,
+        680
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 5,
+        "unit": "seconds"
+      },
+      "id": "a9c1c707-de46-4543-9ae7-3ce1973954a1",
+      "name": "Aguardar 5s (OpenAI Chain)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        280,
+        900
       ],
-      "credentials": {
-        "googlePalmApi": {
-          "id": "AbTZUtCZlIUnulL4",
-          "name": "Google Gemini(PaLM) Api account"
+      "webhookId": "afb2d18e-1253-4464-b718-e1e0822fed51"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Webhook - Cascata IA').first().json.body.prompt }}"
+      },
+      "id": "f28a478a-93b4-420f-98b6-3265537a8f97",
+      "name": "Groq Chain2",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [
+        500,
+        240
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-20b",
+        "options": {
+          "maxTokensToSample": 6000,
+          "temperature": 0.2
         }
-      }
-    },
-    {
-      "parameters": {
-        "promptType": "define",
-        "text": "={{ $json.body.prompt }}"
       },
-      "id": "9277c3e2-00c3-49a3-bebc-21d195ede9e2",
-      "name": "Groq Chain",
-      "type": "@n8n/n8n-nodes-langchain.chainLlm",
-      "typeVersion": 1.4,
-      "position": [
-        -400,
-        400
-      ],
-      "onError": "continueErrorOutput"
-    },
-    {
-      "parameters": {
-        "model": "openai/gpt-oss-120b",
-        "options": {}
-      },
-      "id": "1cfd43da-dcab-4624-9cd4-d76fda5276b3",
-      "name": "Groq Model",
+      "id": "71616a17-33d5-4627-bbc3-e8afceb4160e",
+      "name": "Groq Model2",
       "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
       "typeVersion": 1,
       "position": [
-        -400,
-        600
+        500,
+        460
       ],
       "credentials": {
         "groqApi": {
-          "id": "w1DzJ09lU56BjXqQ",
-          "name": "Groq account"
+          "id": "mALHggRf4ugQOz9I",
+          "name": "Groq account 3"
         }
       }
     },
     {
       "parameters": {
-        "promptType": "define",
-        "text": "={{ $json.body.prompt }}"
+        "jsCode": "// Extrai e valida o JSON da resposta da IA sem o Structured Output Parser (que derruba a\n// chain com \"Model output doesn't fit required format\" à menor sujeira) — mesma lógica do\n// Doc_QA_Generation_HA, só que genérica: o formato e as chaves obrigatórias vêm do próprio\n// pedido do Study Assistant (body.formato / body.chaves_obrigatorias). Se não der, o erro\n// vai pra saída de erro deste nó -> próximo provedor da cascata.\nconst pedido = $('Webhook - Cascata IA').first().json.body || {};\nconst OBRIGATORIAS = Array.isArray(pedido.chaves_obrigatorias) ? pedido.chaves_obrigatorias : [];\nconst bruto = $input.first().json;\nlet texto = bruto.output ?? bruto.text ?? bruto;\nif (typeof texto !== 'string') texto = JSON.stringify(texto);\n\nif (pedido.formato !== 'json') {\n  if (!String(texto).trim()) throw new Error('A IA devolveu uma resposta vazia.');\n  return [{ json: { output: { text: texto } } }];\n}\n\nfunction tentar(s) { try { return JSON.parse(s); } catch (e) { return null; } }\n\nlet obj = tentar(texto);\nif (!obj) {\n  const cerca = texto.match(/```(?:json)?\\s*([\\s\\S]*?)```/i);\n  if (cerca) obj = tentar(cerca[1]);\n}\nif (!obj) {\n  const i = texto.indexOf('{'), j = texto.lastIndexOf('}');\n  if (i >= 0 && j > i) {\n    const miolo = texto.slice(i, j + 1);\n    obj = tentar(miolo) || tentar(miolo.replace(/,\\s*([}\\]])/g, '$1'));\n  }\n}\nif (obj && obj.output && typeof obj.output === 'object' && !OBRIGATORIAS.some(k => k in obj)) obj = obj.output;\nif (!obj || typeof obj !== 'object' || Array.isArray(obj)) {\n  throw new Error('Resposta da IA não é um objeto JSON válido. Início: ' + String(texto).slice(0, 300));\n}\nconst faltam = OBRIGATORIAS.filter(k => !(k in obj));\nif (faltam.length) {\n  throw new Error('JSON sem as chaves obrigatórias: ' + faltam.join(', ') + ' (veio: ' + Object.keys(obj).join(', ') + ')');\n}\nreturn [{ json: { output: obj } }];"
       },
-      "id": "c98580ad-dd15-4c39-a2fd-d28e2ccbe315",
-      "name": "Groq Chain1",
-      "type": "@n8n/n8n-nodes-langchain.chainLlm",
-      "typeVersion": 1.4,
+      "id": "1bdeb51e-e7b1-4390-be30-31bfd4b115c9",
+      "name": "JSON Groq Chain2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
-        0,
-        400
+        700,
+        20
       ],
       "onError": "continueErrorOutput"
     },
     {
       "parameters": {
-        "model": "openai/gpt-oss-120b",
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ef73ca2b-459a-4f30-a542-2299cb6e57df",
+              "leftValue": "={{ /(^|[^0-9])(500|502|503|504|529)([^0-9]|$)|service unavailable|unavailable_error|overloaded|over capacity|high demand|internal (server )?error|bad gateway|gateway time-?out|temporarily unavailable|try again later/i.test(JSON.stringify($json.error ?? $json.message ?? '')) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "80100901-1cca-453f-a9f4-bfc93e04a2fa",
+              "leftValue": "={{ $runIndex }}",
+              "rightValue": 2,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
         "options": {}
       },
-      "id": "2c53860d-c628-4444-a10f-45344c9a5938",
-      "name": "Groq Model1",
-      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
-      "typeVersion": 1,
+      "id": "4c00ff7d-1553-4131-acd4-7e09e856efb8",
+      "name": "Erro 5xx? (Groq Chain2)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
       "position": [
-        0,
-        600
-      ],
-      "credentials": {
-        "groqApi": {
-          "id": "zbYe35SnbFEOa8Ow",
-          "name": "Groq account 2"
-        }
-      }
+        700,
+        680
+      ]
     },
     {
       "parameters": {
-        "promptType": "define",
-        "text": "={{ $json.body.prompt }}"
+        "amount": 5,
+        "unit": "seconds"
       },
-      "id": "280f48d6-e13a-4b3c-b201-eea42875daa8",
-      "name": "Mistral Chain",
-      "type": "@n8n/n8n-nodes-langchain.chainLlm",
-      "typeVersion": 1.4,
+      "id": "8a431180-0215-4323-b1b3-1a8c6c3cf328",
+      "name": "Aguardar 5s (Groq Chain2)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
       "position": [
-        400,
-        100
+        700,
+        900
       ],
-      "onError": "continueErrorOutput"
-    },
-    {
-      "parameters": {
-        "options": {}
-      },
-      "id": "17a51976-f1e2-4e1b-914b-6ded8bf974cf",
-      "name": "Mistral Cloud Chat Model",
-      "type": "@n8n/n8n-nodes-langchain.lmChatMistralCloud",
-      "typeVersion": 1,
-      "position": [
-        400,
-        300
-      ],
-      "credentials": {
-        "mistralCloudApi": {
-          "id": "9GL9zjvyT2pOocwb",
-          "name": "Mistral Cloud account"
-        }
-      }
+      "webhookId": "ae92fe4f-b55e-4a74-9249-8b34b94d3697"
     }
   ],
+  "pinData": {},
   "connections": {
-    "OpenAI Chat Model": {
-      "ai_languageModel": [
+    "Webhook - Cascata IA": {
+      "main": [
         [
           {
-            "node": "OpenAI Chain",
-            "type": "ai_languageModel",
+            "node": "Gemini Chain",
+            "type": "main",
             "index": 0
           }
         ]
@@ -260,12 +751,142 @@
         ]
       ]
     },
+    "Gemini Chain": {
+      "main": [
+        [
+          {
+            "node": "JSON Gemini Chain",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Erro 5xx? (Gemini Chain)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "JSON Gemini Chain": {
+      "main": [
+        [
+          {
+            "node": "Responder Sucesso",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Groq Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Erro 5xx? (Gemini Chain)": {
+      "main": [
+        [
+          {
+            "node": "Aguardar 5s (Gemini Chain)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Groq Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aguardar 5s (Gemini Chain)": {
+      "main": [
+        [
+          {
+            "node": "Gemini Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "Groq Model": {
       "ai_languageModel": [
         [
           {
             "node": "Groq Chain",
             "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Chain": {
+      "main": [
+        [
+          {
+            "node": "JSON Groq Chain",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Erro 5xx? (Groq Chain)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "JSON Groq Chain": {
+      "main": [
+        [
+          {
+            "node": "Responder Sucesso",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Groq Chain1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Erro 5xx? (Groq Chain)": {
+      "main": [
+        [
+          {
+            "node": "Aguardar 5s (Groq Chain)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Groq Chain1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aguardar 5s (Groq Chain)": {
+      "main": [
+        [
+          {
+            "node": "Groq Chain",
+            "type": "main",
             "index": 0
           }
         ]
@@ -282,6 +903,71 @@
         ]
       ]
     },
+    "Groq Chain1": {
+      "main": [
+        [
+          {
+            "node": "JSON Groq Chain1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Erro 5xx? (Groq Chain1)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "JSON Groq Chain1": {
+      "main": [
+        [
+          {
+            "node": "Responder Sucesso",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mistral Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Erro 5xx? (Groq Chain1)": {
+      "main": [
+        [
+          {
+            "node": "Aguardar 5s (Groq Chain1)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mistral Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aguardar 5s (Groq Chain1)": {
+      "main": [
+        [
+          {
+            "node": "Groq Chain1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "Mistral Cloud Chat Model": {
       "ai_languageModel": [
         [
@@ -293,7 +979,137 @@
         ]
       ]
     },
-    "Webhook - Cascata IA": {
+    "Mistral Chain": {
+      "main": [
+        [
+          {
+            "node": "JSON Mistral Chain",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Erro 5xx? (Mistral Chain)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "JSON Mistral Chain": {
+      "main": [
+        [
+          {
+            "node": "Responder Sucesso",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "OpenAI Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Erro 5xx? (Mistral Chain)": {
+      "main": [
+        [
+          {
+            "node": "Aguardar 5s (Mistral Chain)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "OpenAI Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aguardar 5s (Mistral Chain)": {
+      "main": [
+        [
+          {
+            "node": "Mistral Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "OpenAI Chain",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chain": {
+      "main": [
+        [
+          {
+            "node": "JSON OpenAI Chain",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Erro 5xx? (OpenAI Chain)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "JSON OpenAI Chain": {
+      "main": [
+        [
+          {
+            "node": "Responder Sucesso",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Groq Chain2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Erro 5xx? (OpenAI Chain)": {
+      "main": [
+        [
+          {
+            "node": "Aguardar 5s (OpenAI Chain)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Groq Chain2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aguardar 5s (OpenAI Chain)": {
       "main": [
         [
           {
@@ -304,79 +1120,36 @@
         ]
       ]
     },
-    "OpenAI Chain": {
+    "Groq Model2": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Groq Chain2",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Chain2": {
       "main": [
         [
           {
-            "node": "Responder Sucesso",
+            "node": "JSON Groq Chain2",
             "type": "main",
             "index": 0
           }
         ],
         [
           {
-            "node": "Gemini Chain",
+            "node": "Erro 5xx? (Groq Chain2)",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Gemini Chain": {
-      "main": [
-        [
-          {
-            "node": "Responder Sucesso",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Groq Chain",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Groq Chain": {
-      "main": [
-        [
-          {
-            "node": "Responder Sucesso",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Groq Chain1",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Groq Chain1": {
-      "main": [
-        [
-          {
-            "node": "Responder Sucesso",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Mistral Chain",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Mistral Chain": {
+    "JSON Groq Chain2": {
       "main": [
         [
           {
@@ -393,9 +1166,46 @@
           }
         ]
       ]
+    },
+    "Erro 5xx? (Groq Chain2)": {
+      "main": [
+        [
+          {
+            "node": "Aguardar 5s (Groq Chain2)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Responder Erro",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aguardar 5s (Groq Chain2)": {
+      "main": [
+        [
+          {
+            "node": "Groq Chain2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
+  "active": true,
   "settings": {
-    "executionOrder": "v1"
-  }
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "06019c82-e0e7-470a-a1a8-9247614a972a",
+  "meta": {
+    "instanceId": "562c7355cd5a3106fec1249023da836a71cbf8a0d3aa8209a4d6e83ae9e3b852"
+  },
+  "id": "O2Q5TQGHHGruWEKJ",
+  "tags": []
 }

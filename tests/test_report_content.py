@@ -175,3 +175,19 @@ def test_build_report_outline_aplica_reflow_nas_secoes_de_analise() -> None:
         "você acredita que poderiam ter sido detectadas durante as "
         "inspeções e testes."
     )
+
+
+def test_reflow_mantem_o_subtitulo_de_parte_numa_linha_propria() -> None:
+    """Subtítulo "### Parte X de Y — ..." (análise em lotes) não termina em
+    pontuação — sem tratamento, o parágrafo seguinte seria grudado nele."""
+    text = (
+        "### Parte 1 de 2 — Fundamentos\nPrimeiro parágrafo da parte.\n\n"
+        "### Parte 2 de 2 — Organização\nSegundo."
+    )
+
+    assert _reflow_paragraphs(text).split("\n") == [
+        "### Parte 1 de 2 — Fundamentos",
+        "Primeiro parágrafo da parte.",
+        "### Parte 2 de 2 — Organização",
+        "Segundo.",
+    ]

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import io
 
-from study_assistant.domain.entities import StudySession
+from study_assistant.domain.entities import SECTION_SUBHEADING_PREFIX, StudySession
 from study_assistant.domain.exceptions import ReportGenerationError
 from study_assistant.domain.ports import ReportGenerator
 from study_assistant.infrastructure.report_generators.report_content import build_report_outline
@@ -102,8 +102,11 @@ class PdfReportGenerator(ReportGenerator):
             return Paragraph(_escape(text), heading_style)
 
         def body_paragraphs(text: str, style: ParagraphStyle = body_style) -> list[Paragraph]:
+            # "### Parte 2 de 4 — ..." (análise em lotes) sai como subtítulo.
             return [
-                Paragraph(_escape(chunk), style)
+                Paragraph(_escape(chunk[len(SECTION_SUBHEADING_PREFIX):].strip()), subheading_style)
+                if chunk.startswith(SECTION_SUBHEADING_PREFIX)
+                else Paragraph(_escape(chunk), style)
                 for chunk in text.split("\n")
                 if chunk.strip()
             ]

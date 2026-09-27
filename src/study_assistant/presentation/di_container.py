@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import streamlit as st
 
+from study_assistant.application.ai_caller import ResilientAICaller
 from study_assistant.application.analysis_service import AnalyzeStudyMaterialsUseCase
 from study_assistant.application.auth_service import AuthenticateAdminUseCase
 from study_assistant.application.document_service import DocumentIngestionService
@@ -40,7 +41,11 @@ from study_assistant.infrastructure.extractors import (
     PdfTextExtractor,
     TxtTextExtractor,
 )
-from study_assistant.infrastructure.persistence import TursoHttpClient, TursoSessionRepository
+from study_assistant.infrastructure.persistence import (
+    TursoAIResponseStore,
+    TursoHttpClient,
+    TursoSessionRepository,
+)
 from study_assistant.infrastructure.report_generators import ALL_REPORT_GENERATORS
 from study_assistant.infrastructure.security import BcryptPasswordHasher, ConfigUserRepository
 
@@ -57,6 +62,7 @@ class AppContainer:
     report_use_case: GenerateReportUseCase
     history_service: HistoryService
     ai_cascade: AIProviderCascade
+    ai_caller: ResilientAICaller
 
 
 def _build_ai_provider(config: AIProviderSettings) -> AIProvider:
@@ -133,6 +139,13 @@ def build_container(settings: Settings) -> AppContainer:
     document_service = DocumentIngestionService(text_extractor)
 
     ai_cascade = AIProviderCascade(_build_ai_providers(settings))
+    # Uma instância só por processo (o container é cacheado): o relógio da
+    # cota por minuto e as respostas já recebidas valem entre análises.
+    ai_caller = ResilientAICaller(
+        ai_cascade,
+        TursoAIResponseStore(turso_client),
+        saved_responses_days=settings.analysis.saved_responses_days,
+    )
 
     # Construído antes do HistoryService de propósito: desde que o
     # histórico passou a guardar somente o PDF, HistoryService.save() usa
@@ -143,11 +156,20 @@ def build_container(settings: Settings) -> AppContainer:
         settings=settings,
         auth_use_case=auth_use_case,
         document_service=document_service,
-        extraction_use_case=ExtractApostilaInsightsUseCase(ai_cascade),
-        analysis_use_case=AnalyzeStudyMaterialsUseCase(ai_cascade),
+        extraction_use_case=ExtractApostilaInsightsUseCase(
+            ai_caller,
+            batch_chars=settings.analysis.batch_chars,
+            max_chars=settings.analysis.max_total_chars,
+        ),
+        analysis_use_case=AnalyzeStudyMaterialsUseCase(
+            ai_caller,
+            batch_chars=settings.analysis.batch_chars,
+            max_total_chars=settings.analysis.max_total_chars,
+        ),
         report_use_case=report_use_case,
         history_service=HistoryService(session_repository, report_use_case),
         ai_cascade=ai_cascade,
+        ai_caller=ai_caller,
     )
 
 

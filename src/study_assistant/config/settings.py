@@ -49,16 +49,17 @@ class N8nSettings:
     """Configuração do webhook n8n — mesmo padrão dos outros apps do
     usuário ([n8n] webhook_url = "..."). Quando preenchido, o app usa esse
     webhook como ÚNICO elo da cascata (o n8n é quem decide, internamente,
-    a ordem OpenAI -> Gemini -> Groq -> Groq -> Mistral e o fallback entre
-    eles) — as seções [ai.*] deixam de ser usadas nesse caso."""
+    a ordem Gemini -> Groq -> Groq 2 -> Mistral -> OpenAI -> Groq 3 e o
+    fallback entre eles) — as seções [ai.*] deixam de ser usadas nesse caso."""
 
     webhook_url: str
     auth_header_name: str = ""
     auth_header_value: str = ""
-    # O workflow n8n tenta até 5 provedores em SEQUÊNCIA (OpenAI -> Gemini ->
-    # Groq -> Groq -> Mistral) antes de responder — se vários falharem/
-    # demorarem antes do que funciona, a soma pode passar de um timeout
-    # curto. 300s (5min) dá folga; ajustável via secrets se ainda não bastar.
+    # O workflow n8n tenta até 6 provedores em SEQUÊNCIA (Gemini -> Groq ->
+    # Groq 2 -> Mistral -> OpenAI -> Groq 3) antes de responder — se vários
+    # falharem/demorarem antes do que funciona, a soma pode passar de um
+    # timeout curto. 300s (5min) dá folga; ajustável via secrets se ainda
+    # não bastar.
     timeout_seconds: float = 300.0
 
     @property
@@ -81,6 +82,22 @@ class AIProviderSettings:
 
 
 @dataclass(frozen=True)
+class AnalysisSettings:
+    """Análise em lotes (ver ``application/analysis_service.py``)."""
+
+    # Limite de texto analisado por rodada, somando todos os materiais
+    # (~10 lotes). Acima disso, o resto de cada material não é analisado e
+    # uma observação diz quanto ficou de fora.
+    max_total_chars: int = 120_000
+    # Tamanho de cada lote — o mesmo do qa_testgen, que já cabe na cota por
+    # minuto das IAs gratuitas da cascata.
+    batch_chars: int = 12_000
+    # Por quantos dias as respostas da IA ficam salvas pra continuar uma
+    # análise pausada sem pedir de novo o que já veio.
+    saved_responses_days: int = 7
+
+
+@dataclass(frozen=True)
 class SecuritySettings:
     bcrypt_rounds: int = 12
     max_login_attempts: int = 5
@@ -94,6 +111,7 @@ class Settings:
     n8n: N8nSettings
     ai_cascade: list[AIProviderSettings] = field(default_factory=list)
     security: SecuritySettings = field(default_factory=SecuritySettings)
+    analysis: AnalysisSettings = field(default_factory=AnalysisSettings)
 
     @property
     def configured_ai_cascade(self) -> list[AIProviderSettings]:
@@ -190,12 +208,22 @@ def load_settings(secrets: Mapping[str, Any]) -> Settings:
         lock_minutes=int(_get(secrets, "security", "lock_minutes", default=15)),
     )
 
+    defaults = AnalysisSettings()
+    analysis = AnalysisSettings(
+        max_total_chars=int(_get(secrets, "analysis", "max_total_chars", default=defaults.max_total_chars)),
+        batch_chars=int(_get(secrets, "analysis", "batch_chars", default=defaults.batch_chars)),
+        saved_responses_days=int(
+            _get(secrets, "analysis", "saved_responses_days", default=defaults.saved_responses_days)
+        ),
+    )
+
     return Settings(
         turso=turso,
         auth=auth,
         n8n=n8n,
         ai_cascade=ai_cascade,
         security=security,
+        analysis=analysis,
     )
 
 

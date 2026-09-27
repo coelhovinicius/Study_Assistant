@@ -5,6 +5,7 @@ de rede de verdade, só `requests.post` trocado por um dublê via monkeypatch.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -51,7 +52,7 @@ def test_extrai_texto_do_campo_output(monkeypatch: pytest.MonkeyPatch) -> None:
     result = _provider().generate("pergunta")
 
     assert result == '{"ok": true}'
-    assert fake_post.calls[0]["json"] == {"prompt": "pergunta"}
+    assert fake_post.calls[0]["json"] == {"prompt": "pergunta", "formato": "text", "chaves_obrigatorias": []}
 
 
 def test_extrai_texto_do_campo_response_aninhado(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -124,3 +125,51 @@ def test_nao_envia_header_de_auth_quando_nao_configurado(monkeypatch: pytest.Mon
 
 def test_provider_name_e_n8n() -> None:
     assert _provider().provider_name == "n8n"
+
+
+# --- contrato com o workflow no padrão do Doc_QA_Generation_HA -----------
+#
+# Os nós "JSON ..." do workflow conferem o formato e as chaves obrigatórias
+# de cada resposta e, se faltar alguma, passam pra próxima IA — pra isso o
+# app manda no corpo do pedido o que espera receber.
+
+
+def test_envia_formato_e_chaves_obrigatorias_para_o_workflow_validar(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_post = _FakePost([_FakeResponse(200, {"titulo": "T", "analise": "A", "resumo": "R"})])
+    monkeypatch.setattr("requests.post", fake_post)
+
+    _provider().generate("pergunta", response_format="json", required_keys=("titulo", "analise", "resumo"))
+
+    body = fake_post.calls[0]["json"]
+    assert body["formato"] == "json"
+    assert body["chaves_obrigatorias"] == ["titulo", "analise", "resumo"]
+    assert body["prompt"].startswith("pergunta")
+
+
+def test_objeto_ja_validado_pelo_workflow_volta_inteiro_como_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_post = _FakePost([_FakeResponse(200, {"titulo": "T", "analise": "A", "resumo": "R"})])
+    monkeypatch.setattr("requests.post", fake_post)
+
+    result = _provider().generate("pergunta", response_format="json", required_keys=("titulo", "analise", "resumo"))
+
+    assert json.loads(result) == {"titulo": "T", "analise": "A", "resumo": "R"}
+
+
+def test_workflow_antigo_que_devolve_o_texto_num_envelope_continua_funcionando(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Até o workflow novo ser importado no n8n, a resposta ainda vem como
+    {"text": "<json>"} — o texto de dentro é o que interessa."""
+    fake_post = _FakePost([_FakeResponse(200, {"text": '{"titulo": "T"}'})])
+    monkeypatch.setattr("requests.post", fake_post)
+
+    result = _provider().generate("pergunta", response_format="json", required_keys=("titulo",))
+
+    assert result == '{"titulo": "T"}'
+
+
+def test_http_502_do_workflow_traz_o_motivo_real_na_mensagem(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = {"error": "Todos os provedores de IA falharam", "detalhe": "Request too large ... tokens per minute"}
+    fake_post = _FakePost([_FakeResponse(502, body, text=json.dumps(body))])
+    monkeypatch.setattr("requests.post", fake_post)
+
+    with pytest.raises(AIProviderError, match="tokens per minute"):
+        _provider().generate("pergunta", response_format="json", required_keys=("titulo",))

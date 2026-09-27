@@ -17,8 +17,9 @@ import logging
 import time
 from dataclasses import dataclass
 
+from study_assistant.application.ai_json_utils import parse_json_response
 from study_assistant.domain.entities import ProviderAttempt
-from study_assistant.domain.exceptions import AIProviderError, AllProvidersFailedError
+from study_assistant.domain.exceptions import AIProviderError, AllProvidersFailedError, InvalidAIResponseError
 from study_assistant.domain.ports import AIProvider, ResponseFormat
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,19 @@ class CascadeRunResult:
     attempts: tuple[ProviderAttempt, ...]
 
 
+def _check_required_keys(provider_name: str, text: str, required_keys: tuple[str, ...]) -> None:
+    """Mesma regra dos nós "JSON ..." do workflow do n8n, pro modo Python
+    direto: resposta que não é JSON, ou sem alguma chave pedida, conta
+    como falha DESTE provedor — a cascata segue pro próximo."""
+    try:
+        data = parse_json_response(text)
+    except InvalidAIResponseError as exc:
+        raise AIProviderError(provider_name, str(exc)) from exc
+    missing = [key for key in required_keys if key not in data]
+    if missing:
+        raise AIProviderError(provider_name, f"JSON sem as chaves obrigatórias: {', '.join(missing)}")
+
+
 class AIProviderCascade(AIProvider):
     def __init__(self, providers: list[AIProvider]) -> None:
         if not providers:
@@ -46,11 +60,23 @@ class AIProviderCascade(AIProvider):
         chain = " → ".join(p.provider_name for p in self._providers)
         return f"Cascata ({chain})"
 
-    def generate(self, prompt: str, *, response_format: ResponseFormat = "text") -> str:
-        return self.generate_with_details(prompt, response_format=response_format).text
+    def generate(
+        self,
+        prompt: str,
+        *,
+        response_format: ResponseFormat = "text",
+        required_keys: tuple[str, ...] = (),
+    ) -> str:
+        return self.generate_with_details(
+            prompt, response_format=response_format, required_keys=required_keys
+        ).text
 
     def generate_with_details(
-        self, prompt: str, *, response_format: ResponseFormat = "text"
+        self,
+        prompt: str,
+        *,
+        response_format: ResponseFormat = "text",
+        required_keys: tuple[str, ...] = (),
     ) -> CascadeRunResult:
         attempts: list[ProviderAttempt] = []
 
@@ -58,7 +84,9 @@ class AIProviderCascade(AIProvider):
             model_label = getattr(provider, "model", "desconhecido")
             start = time.monotonic()
             try:
-                text = provider.generate(prompt, response_format=response_format)
+                text = provider.generate(prompt, response_format=response_format, required_keys=required_keys)
+                if response_format == "json" and required_keys:
+                    _check_required_keys(provider.provider_name, text, required_keys)
             except AIProviderError as exc:
                 duration_ms = (time.monotonic() - start) * 1000
                 logger.warning(

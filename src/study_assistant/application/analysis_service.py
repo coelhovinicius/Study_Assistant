@@ -1,26 +1,49 @@
 """Caso de uso: análise expandida final, dividida por assunto, e resolução
 do desafio prático (itens 6, 9 e 10 do fluxo original do usuário).
 
-Depende do orquestrador de cascata (não só de um ``AIProvider`` genérico)
-porque o relatório final precisa registrar qual provedor efetivamente
-respondeu e quais falharam antes — essa transparência é parte do que o
-usuário pediu ao mostrar o fluxo de fallback em n8n.
+Feita em lotes, pra caber na cota por minuto das IAs gratuitas (ver
+``ai_caller.py``) — mas o resultado continua sendo UMA análise, com as
+mesmas 8 seções de sempre, num PDF só:
+
+1. cada material é dividido em lotes de ~12 mil caracteres (sempre entre
+   parágrafos) e cada lote recebe sua análise detalhada, um título curto e
+   um resumo curto;
+2. a seção de cada material (apostila, livro, podcast, outros) junta as
+   análises dos seus lotes em ordem, cada uma sob um subtítulo "Parte X de
+   Y — título" — material de um lote só não ganha subtítulo;
+3. as 4 seções finais (referências, dicas, desafio, síntese) saem de
+   chamadas pequenas, feitas a partir dos trechos extraídos da apostila e
+   dos resumos curtos de cada lote.
+
+Nenhum lote fica sem análise: se a IA falhar num lote mesmo depois das
+retentativas, a análise pausa (``AnalysisPausedError``) e, ao continuar,
+os lotes já respondidos voltam do banco sem nova chamada à IA.
 """
 
 from __future__ import annotations
 
-from study_assistant.application.ai_json_utils import parse_json_response
-from study_assistant.config.prompts import build_analysis_prompt
+from dataclasses import dataclass
+
+from study_assistant.application.ai_caller import AICallResult, ProgressFn, ResilientAICaller
+from study_assistant.application.text_batches import split_into_batches
+from study_assistant.config.prompts import (
+    BATCH_ANALYSIS_KEYS,
+    build_batch_analysis_prompt,
+    build_challenge_prompt,
+    build_reading_tips_prompt,
+    build_references_prompt,
+    build_synthesis_prompt,
+)
 from study_assistant.domain.entities import (
     ANALYSIS_SECTION_ORDER,
+    SECTION_SUBHEADING_PREFIX,
     AnalysisResult,
     ApostilaInsights,
+    ExtractedSection,
     ExtractionMethod,
     Material,
     MaterialType,
 )
-from study_assistant.domain.exceptions import InvalidAIResponseError
-from study_assistant.infrastructure.ai_providers.cascade import AIProviderCascade
 
 _MATERIAL_TYPE_LABELS: dict[MaterialType, str] = {
     MaterialType.APOSTILA: "Apostila",
@@ -29,78 +52,313 @@ _MATERIAL_TYPE_LABELS: dict[MaterialType, str] = {
     MaterialType.OUTRO: "Outro material",
 }
 
-_INSIGHT_LABELS: dict[str, str] = {
-    "referencias_bibliograficas": "Referências Bibliográficas",
-    "dicas_leitura": "Dicas/Indicações de Leitura",
-    "desafio_pratico": "Desafio Prático",
+_MATERIAL_SECTION_KEYS: dict[MaterialType, str] = {
+    MaterialType.APOSTILA: "analise_apostila",
+    MaterialType.LIVRO: "analise_livro",
+    MaterialType.AUDIODESCRICAO_PODCAST: "analise_podcast",
+    MaterialType.OUTRO: "analise_outros_materiais",
 }
 
-# Limite de segurança para não estourar a janela de contexto dos modelos
-# menores da cascata (ex: modelos Groq). Ajuste conforme necessário.
-_MAX_CHARS_FOR_MATERIALS_CONTEXT = 120_000
+# O que o prompt original pedia de cada tipo de material, agora por lote.
+_MATERIAL_FOCUS: dict[MaterialType, str] = {
+    MaterialType.APOSTILA: (
+        "resumo aprofundado, conceitos-chave, pontos de atenção e conexões entre os temas."
+    ),
+    MaterialType.LIVRO: (
+        "os conceitos que o livro traz para complementar a apostila da disciplina — "
+        "aprofunde o que é próprio do livro."
+    ),
+    MaterialType.AUDIODESCRICAO_PODCAST: (
+        "as principais ideias do podcast e como elas se relacionam com o conteúdo da disciplina."
+    ),
+    MaterialType.OUTRO: (
+        "as principais ideias deste material e como elas se relacionam com o conteúdo da disciplina."
+    ),
+}
+
+# Seção final sem o trecho correspondente na apostila: vai uma frase fixa,
+# sem gastar uma chamada de IA só pra ela dizer que não há o que analisar.
+_NOT_FOUND_NOTES: dict[str, str] = {
+    "analise_referencias_bibliograficas": "Não foram encontradas referências bibliográficas na apostila enviada.",
+    "analise_dicas_leitura": "Não foram encontradas dicas ou indicações de leitura na apostila enviada.",
+    "analise_e_resolucao_desafio": "Não foi encontrado um desafio prático na apostila enviada.",
+}
+
+
+def _format_count(value: int) -> str:
+    return f"{value:,}".replace(",", ".")
+
+
+def _cap(text: str, limit: int) -> str:
+    """Trechos extraídos da apostila vão inteiros pras seções finais, a não
+    ser que passem do tamanho de um lote (ex: uma heurística que pegou do
+    cabeçalho "Referências" até o fim do arquivo)."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n[... texto cortado por tamanho ...]"
+
+
+@dataclass(frozen=True)
+class _Batch:
+    material: Material
+    number: int
+    total: int
+    text: str
+
+
+@dataclass(frozen=True)
+class _BatchAnalysis:
+    batch: _Batch
+    title: str
+    analysis: str
+    summary: str
+
+
+@dataclass(frozen=True)
+class _FinalCall:
+    section_key: str
+    description: str
+    prompt: str
 
 
 class AnalyzeStudyMaterialsUseCase:
-    def __init__(self, ai_cascade: AIProviderCascade) -> None:
-        self._ai_cascade = ai_cascade
+    def __init__(
+        self,
+        ai_caller: ResilientAICaller,
+        *,
+        batch_chars: int = 12_000,
+        max_total_chars: int = 120_000,
+    ) -> None:
+        self._ai_caller = ai_caller
+        self._batch_chars = batch_chars
+        self._max_total_chars = max_total_chars
 
-    def execute(self, materials: list[Material], insights: ApostilaInsights) -> AnalysisResult:
-        prompt = build_analysis_prompt(
-            materials_context=self._build_materials_context(materials),
-            insights_context=self._build_insights_context(insights),
-        )
+    def execute(
+        self,
+        materials: list[Material],
+        insights: ApostilaInsights,
+        *,
+        progress: ProgressFn | None = None,
+    ) -> AnalysisResult:
+        batches, notes = self._plan(materials)
+        multi_file_types = self._types_with_several_files(batches)
 
-        run_result = self._ai_cascade.generate_with_details(prompt, response_format="json")
+        # As 4 chamadas finais só dependem dos lotes, então dá pra saber o
+        # total de etapas antes de começar — "etapa 3 de 12" na tela.
+        final_steps = sum(1 for s in self._final_sources(insights).values() if s is not None)
+        total_steps = len(batches) + final_steps + (1 if batches else 0)
+        step = 0
 
-        try:
-            raw_sections = parse_json_response(run_result.text)
-        except InvalidAIResponseError:
-            # Não descarta a resposta da IA só porque o JSON veio malformado:
-            # guarda o texto bruto na síntese geral pra não perder o trabalho.
-            raw_sections = {"sintese_geral": run_result.text}
+        results: list[AICallResult] = []
+        analyses: list[_BatchAnalysis] = []
+        for batch in batches:
+            step += 1
+            label = f"Etapa {step} de {total_steps}: {self._batch_label(batch, multi_file_types)}"
+            result = self._ai_caller.call_json(
+                build_batch_analysis_prompt(
+                    material_label=_MATERIAL_TYPE_LABELS[batch.material.material_type],
+                    filename=batch.material.filename,
+                    focus=_MATERIAL_FOCUS[batch.material.material_type],
+                    part_number=batch.number,
+                    part_count=batch.total,
+                    text=batch.text,
+                ),
+                required_keys=BATCH_ANALYSIS_KEYS,
+                label=label,
+                progress=progress,
+            )
+            results.append(result)
+            analyses.append(
+                _BatchAnalysis(
+                    batch=batch,
+                    title=str(result.data.get("titulo") or "").strip(),
+                    analysis=str(result.data.get("analise") or "").strip(),
+                    summary=str(result.data.get("resumo") or "").strip(),
+                )
+            )
+            _report_done(progress, label, result)
 
-        normalized_sections = {
-            key: str(raw_sections.get(key, "")).strip() for key in ANALYSIS_SECTION_ORDER
-        }
+        sections = {key: "" for key in ANALYSIS_SECTION_ORDER}
+        for material_type, section_key in _MATERIAL_SECTION_KEYS.items():
+            sections[section_key] = self._assemble_material_section(
+                material_type, materials, analyses, notes, multi_file_types
+            )
+
+        for final_call in self._final_calls(insights, analyses, multi_file_types):
+            if final_call.prompt == "":
+                sections[final_call.section_key] = _NOT_FOUND_NOTES.get(final_call.section_key, "")
+                continue
+            step += 1
+            label = f"Etapa {step} de {total_steps}: {final_call.description}"
+            result = self._ai_caller.call_json(
+                final_call.prompt,
+                required_keys=(final_call.section_key,),
+                label=label,
+                progress=progress,
+            )
+            results.append(result)
+            sections[final_call.section_key] = str(result.data.get(final_call.section_key) or "").strip()
+            _report_done(progress, label, result)
 
         return AnalysisResult(
-            sections=normalized_sections,
-            generated_by_provider=run_result.provider_name,
-            generated_by_model=run_result.model,
-            provider_attempts=run_result.attempts,
+            sections=sections,
+            generated_by_provider=", ".join(dict.fromkeys(r.provider_name for r in results if r.provider_name)),
+            generated_by_model=", ".join(dict.fromkeys(r.model for r in results if r.model)),
+            provider_attempts=tuple(attempt for r in results for attempt in r.attempts),
         )
 
-    @staticmethod
-    def _build_materials_context(materials: list[Material]) -> str:
-        parts = []
+    def _plan(self, materials: list[Material]) -> tuple[list[_Batch], dict[str, str]]:
+        """Lotes de cada material, na ordem em que vieram (apostila primeiro),
+        dentro do limite total de caracteres por análise. O que passa do
+        limite não some calado: vira uma observação no fim da seção."""
+        remaining = self._max_total_chars
+        batches: list[_Batch] = []
+        notes: dict[str, str] = {}
         for material in materials:
-            label = _MATERIAL_TYPE_LABELS.get(material.material_type, material.material_type.value)
-            parts.append(
-                f"===== INÍCIO DO DOCUMENTO: {material.filename} (TIPO: {label}) =====\n"
-                f"{material.raw_text}\n"
-                f"===== FIM DO DOCUMENTO: {material.filename} =====\n"
+            text = material.raw_text.strip()
+            taken = text[: max(remaining, 0)]
+            remaining -= len(taken)
+            cut = len(text) - len(taken)
+            if cut and taken:
+                notes[material.id] = (
+                    f'Observação: "{material.filename}" passou do limite de '
+                    f"{_format_count(self._max_total_chars)} caracteres por análise — os últimos "
+                    f"{_format_count(cut)} caracteres não foram analisados."
+                )
+            elif cut:
+                notes[material.id] = (
+                    f'Observação: "{material.filename}" não foi analisado — o limite de '
+                    f"{_format_count(self._max_total_chars)} caracteres por análise já tinha sido "
+                    "usado pelos materiais anteriores."
+                )
+            parts = split_into_batches(taken, self._batch_chars)
+            batches.extend(
+                _Batch(material=material, number=number, total=len(parts), text=part)
+                for number, part in enumerate(parts, start=1)
             )
-        context = "\n".join(parts)
-
-        if len(context) > _MAX_CHARS_FOR_MATERIALS_CONTEXT:
-            context = (
-                context[:_MAX_CHARS_FOR_MATERIALS_CONTEXT]
-                + "\n\n[... conteúdo truncado por limite de tamanho ...]"
-            )
-        return context
+        return batches, notes
 
     @staticmethod
-    def _build_insights_context(insights: ApostilaInsights) -> str:
-        pairs = (
-            ("referencias_bibliograficas", insights.referencias_bibliograficas),
-            ("dicas_leitura", insights.dicas_leitura),
-            ("desafio_pratico", insights.desafio_pratico),
+    def _types_with_several_files(batches: list[_Batch]) -> set[MaterialType]:
+        files_by_type: dict[MaterialType, set[str]] = {}
+        for batch in batches:
+            files_by_type.setdefault(batch.material.material_type, set()).add(batch.material.id)
+        return {material_type for material_type, ids in files_by_type.items() if len(ids) > 1}
+
+    @staticmethod
+    def _batch_label(batch: _Batch, multi_file_types: set[MaterialType]) -> str:
+        label = _MATERIAL_TYPE_LABELS[batch.material.material_type]
+        if batch.material.material_type in multi_file_types:
+            label += f" ({batch.material.filename})"
+        if batch.total > 1:
+            label += f", parte {batch.number} de {batch.total}"
+        return label
+
+    @staticmethod
+    def _part_heading(item: _BatchAnalysis, multi_file_types: set[MaterialType]) -> str:
+        pieces = []
+        if item.batch.material.material_type in multi_file_types:
+            pieces.append(item.batch.material.filename)
+        if item.batch.total > 1:
+            pieces.append(f"Parte {item.batch.number} de {item.batch.total}")
+        if item.title:
+            pieces.append(item.title)
+        return " — ".join(pieces)
+
+    def _assemble_material_section(
+        self,
+        material_type: MaterialType,
+        materials: list[Material],
+        analyses: list[_BatchAnalysis],
+        notes: dict[str, str],
+        multi_file_types: set[MaterialType],
+    ) -> str:
+        blocks: list[str] = []
+        for material in materials:
+            if material.material_type is not material_type:
+                continue
+            for item in (a for a in analyses if a.batch.material.id == material.id):
+                if item.batch.total == 1 and material_type not in multi_file_types:
+                    blocks.append(item.analysis)
+                else:
+                    heading = self._part_heading(item, multi_file_types)
+                    blocks.append(f"{SECTION_SUBHEADING_PREFIX}{heading}\n{item.analysis}")
+            if material.id in notes:
+                blocks.append(notes[material.id])
+        return "\n\n".join(block for block in blocks if block.strip())
+
+    @staticmethod
+    def _final_sources(insights: ApostilaInsights) -> dict[str, ExtractedSection | None]:
+        """Trecho da apostila de cada seção final — None quando não foi
+        encontrado (a seção sai com uma frase fixa, sem chamar a IA). A
+        síntese não depende de trecho nenhum, só dos resumos."""
+
+        def found(section: ExtractedSection) -> ExtractedSection | None:
+            if section.method == ExtractionMethod.NAO_ENCONTRADO or not section.content.strip():
+                return None
+            return section
+
+        return {
+            "analise_referencias_bibliograficas": found(insights.referencias_bibliograficas),
+            "analise_dicas_leitura": found(insights.dicas_leitura),
+            "analise_e_resolucao_desafio": found(insights.desafio_pratico),
+        }
+
+    def _final_calls(
+        self,
+        insights: ApostilaInsights,
+        analyses: list[_BatchAnalysis],
+        multi_file_types: set[MaterialType],
+    ) -> list[_FinalCall]:
+        topics = "\n".join(
+            f"- {self._batch_label(a.batch, multi_file_types)}: {a.title or '(sem título)'}"
+            for a in analyses
         )
-        lines = []
-        for key, section in pairs:
-            label = _INSIGHT_LABELS[key]
-            if section.method == ExtractionMethod.NAO_ENCONTRADO:
-                lines.append(f"- {label}: não encontrado(a) no material enviado.")
-            else:
-                lines.append(f"- {label}:\n{section.content}")
-        return "\n\n".join(lines)
+        summaries = _cap(
+            "\n\n".join(
+                f"[{self._batch_label(a.batch, multi_file_types)} — {a.title or 'sem título'}]\n{a.summary}"
+                for a in analyses
+            ),
+            self._batch_chars * 2,
+        )
+        sources = self._final_sources(insights)
+        references = sources["analise_referencias_bibliograficas"]
+        tips = sources["analise_dicas_leitura"]
+        challenge = sources["analise_e_resolucao_desafio"]
+
+        # prompt "" = trecho não encontrado na apostila (ver _NOT_FOUND_NOTES)
+        calls = [
+            _FinalCall(
+                "analise_referencias_bibliograficas",
+                "analisando as referências bibliográficas",
+                build_references_prompt(references_text=_cap(references.content, self._batch_chars), topics=topics)
+                if references
+                else "",
+            ),
+            _FinalCall(
+                "analise_dicas_leitura",
+                "analisando as dicas de leitura",
+                build_reading_tips_prompt(tips_text=_cap(tips.content, self._batch_chars), topics=topics)
+                if tips
+                else "",
+            ),
+            _FinalCall(
+                "analise_e_resolucao_desafio",
+                "resolvendo o desafio prático",
+                build_challenge_prompt(challenge_text=_cap(challenge.content, self._batch_chars), summaries=summaries)
+                if challenge
+                else "",
+            ),
+        ]
+        if analyses:
+            calls.append(
+                _FinalCall("sintese_geral", "escrevendo a síntese geral", build_synthesis_prompt(summaries=summaries))
+            )
+        return calls
+
+
+def _report_done(progress: ProgressFn | None, label: str, result: AICallResult) -> None:
+    if progress:
+        suffix = " (já estava salva — sem nova chamada à IA)" if result.from_saved else ""
+        progress(f"✅ {label}{suffix}", done=True)
