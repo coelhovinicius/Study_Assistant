@@ -17,6 +17,9 @@ _EXTENSION_TO_FORMAT: dict[str, SourceFormat] = {
     ".pdf": SourceFormat.PDF,
     ".docx": SourceFormat.DOCX,
     ".txt": SourceFormat.TXT,
+    ".md": SourceFormat.MD,
+    ".html": SourceFormat.HTML,
+    ".htm": SourceFormat.HTML,
 }
 
 

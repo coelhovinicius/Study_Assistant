@@ -174,7 +174,7 @@ class PdfReportGenerator(ReportGenerator):
             story.append(hr())
 
         if outline.insights:
-            story.append(heading("Extrações da Apostila"))
+            story.append(heading(outline.insights_title))
             for insight in outline.insights:
                 story.append(Paragraph(_escape(insight.label), subheading_style))
                 story.append(Paragraph(f"({_escape(insight.method_label)})", method_style))

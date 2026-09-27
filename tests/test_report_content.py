@@ -205,3 +205,37 @@ def test_split_bold_separa_os_trechos_em_negrito_do_markdown() -> None:
     ]
     assert split_bold("asterisco sem par ** some") == [("asterisco sem par  some", False)]
     assert strip_bold("### **Parte 1** — Título") == "### Parte 1 — Título"
+
+
+def test_sem_apostila_o_bloco_de_extracoes_fala_em_material_e_esconde_o_nao_encontrado() -> None:
+    session = _minimal_session(
+        apostila_insights=ApostilaInsights(
+            referencias_bibliograficas=ExtractedSection("", ExtractionMethod.NAO_ENCONTRADO),
+            dicas_leitura=ExtractedSection("", ExtractionMethod.NAO_ENCONTRADO),
+            desafio_pratico=ExtractedSection("Caso da startup.", ExtractionMethod.HEURISTICA),
+            from_apostila=False,
+        )
+    )
+
+    outline = build_report_outline(session)
+
+    assert outline.insights_title == "Extrações do Material"
+    assert [item.label for item in outline.insights] == ["Desafio Prático (norte para a resolução)"]
+    assert outline.insights[0].method_label == "encontrado diretamente no material"
+
+
+def test_com_apostila_o_bloco_de_extracoes_continua_igual() -> None:
+    session = _minimal_session(
+        apostila_insights=ApostilaInsights(
+            referencias_bibliograficas=ExtractedSection("", ExtractionMethod.NAO_ENCONTRADO),
+            dicas_leitura=ExtractedSection("Leia X.", ExtractionMethod.HEURISTICA),
+            desafio_pratico=ExtractedSection("Resolva Y.", ExtractionMethod.HEURISTICA),
+        )
+    )
+
+    outline = build_report_outline(session)
+
+    assert outline.insights_title == "Extrações da Apostila"
+    assert len(outline.insights) == 3
+    assert outline.insights[0].content == "(não encontrado)"
+    assert outline.insights[1].method_label == "encontrado diretamente na apostila"

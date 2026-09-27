@@ -150,10 +150,12 @@ class AnalyzeStudyMaterialsUseCase:
     def execute(
         self,
         materials: list[Material],
-        insights: ApostilaInsights,
+        insights: ApostilaInsights | None,
         *,
         progress: ProgressFn | None = None,
     ) -> AnalysisResult:
+        """``insights`` None = análise sem apostila: só a seção de cada
+        material e a síntese (referências, dicas e desafio vêm da apostila)."""
         batches, notes = self._plan(materials)
         multi_file_types = self._types_with_several_files(batches)
 
@@ -303,25 +305,34 @@ class AnalyzeStudyMaterialsUseCase:
         return "\n\n".join(block for block in blocks if block.strip())
 
     @staticmethod
-    def _final_sources(insights: ApostilaInsights) -> dict[str, ExtractedSection | None]:
+    def _final_sources(insights: ApostilaInsights | None) -> dict[str, ExtractedSection | None]:
         """Trecho da apostila de cada seção final — None quando não foi
-        encontrado (a seção sai com uma frase fixa, sem chamar a IA). A
-        síntese não depende de trecho nenhum, só dos resumos."""
+        encontrado (a seção sai com uma frase fixa, sem chamar a IA). Sem
+        apostila na análise (``insights`` None), nenhuma dessas seções
+        existe: nem chamada, nem frase de "não encontrado". A síntese não
+        depende de trecho nenhum, só dos resumos."""
+        if insights is None:
+            return {}
 
         def found(section: ExtractedSection) -> ExtractedSection | None:
             if section.method == ExtractionMethod.NAO_ENCONTRADO or not section.content.strip():
                 return None
             return section
 
-        return {
+        sources = {
             "analise_referencias_bibliograficas": found(insights.referencias_bibliograficas),
             "analise_dicas_leitura": found(insights.dicas_leitura),
             "analise_e_resolucao_desafio": found(insights.desafio_pratico),
         }
+        if not insights.from_apostila:
+            # Sem apostila (trechos vindos de "Outros materiais"): o que não
+            # foi encontrado não aparece — não houve apostila pra "não ter".
+            return {key: section for key, section in sources.items() if section is not None}
+        return sources
 
     def _final_calls(
         self,
-        insights: ApostilaInsights,
+        insights: ApostilaInsights | None,
         analyses: list[_BatchAnalysis],
         multi_file_types: set[MaterialType],
     ) -> list[_FinalCall]:
@@ -336,34 +347,25 @@ class AnalyzeStudyMaterialsUseCase:
             ),
             self._batch_chars * 2,
         )
-        sources = self._final_sources(insights)
-        references = sources["analise_referencias_bibliograficas"]
-        tips = sources["analise_dicas_leitura"]
-        challenge = sources["analise_e_resolucao_desafio"]
-
-        # prompt "" = trecho não encontrado na apostila (ver _NOT_FOUND_NOTES)
-        calls = [
-            _FinalCall(
-                "analise_referencias_bibliograficas",
+        builders = {
+            "analise_referencias_bibliograficas": (
                 "analisando as referências bibliográficas",
-                build_references_prompt(references_text=_cap(references.content, self._batch_chars), topics=topics)
-                if references
-                else "",
+                lambda text: build_references_prompt(references_text=text, topics=topics),
             ),
-            _FinalCall(
-                "analise_dicas_leitura",
+            "analise_dicas_leitura": (
                 "analisando as dicas de leitura",
-                build_reading_tips_prompt(tips_text=_cap(tips.content, self._batch_chars), topics=topics)
-                if tips
-                else "",
+                lambda text: build_reading_tips_prompt(tips_text=text, topics=topics),
             ),
-            _FinalCall(
-                "analise_e_resolucao_desafio",
+            "analise_e_resolucao_desafio": (
                 "resolvendo o desafio prático",
-                build_challenge_prompt(challenge_text=_cap(challenge.content, self._batch_chars), summaries=summaries)
-                if challenge
-                else "",
+                lambda text: build_challenge_prompt(challenge_text=text, summaries=summaries),
             ),
+        }
+        # prompt "" = trecho não encontrado na apostila (ver _NOT_FOUND_NOTES).
+        # Sem apostila, _final_sources vem vazio e nenhuma dessas entra.
+        calls = [
+            _FinalCall(key, builders[key][0], builders[key][1](_cap(section.content, self._batch_chars)) if section else "")
+            for key, section in self._final_sources(insights).items()
         ]
         if analyses:
             calls.append(

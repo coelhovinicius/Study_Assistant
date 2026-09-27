@@ -37,6 +37,8 @@ class SourceFormat(str, Enum):
     PDF = "pdf"
     TXT = "txt"
     DOCX = "docx"
+    MD = "md"
+    HTML = "html"
 
 
 class ExtractionMethod(str, Enum):
@@ -73,11 +75,18 @@ class ExtractedSection:
 
 @dataclass(frozen=True)
 class ApostilaInsights:
-    """Os três itens que hoje o usuário extrai manualmente da apostila."""
+    """Os três itens que hoje o usuário extrai manualmente da apostila.
+
+    Também saem dos documentos em "Outros materiais" (ex: um "Desafio
+    Profissional" enviado sem apostila). ``from_apostila`` False = nenhuma
+    apostila na análise: o que não foi encontrado simplesmente não aparece
+    (em vez de "não encontrado na apostila enviada") e os rótulos falam em
+    "material", não em "apostila"."""
 
     referencias_bibliograficas: ExtractedSection
     dicas_leitura: ExtractedSection
     desafio_pratico: ExtractedSection
+    from_apostila: bool = True
 
     @property
     def is_complete(self) -> bool:

@@ -42,16 +42,26 @@ def render_generation_details(session: StudySession) -> None:
 
 
 def render_insights(session: StudySession) -> None:
-    if not session.apostila_insights:
+    insights = session.apostila_insights
+    if not insights:
         return
-    with st.expander("📎 Extrações da apostila (referências, dicas, desafio)"):
+    # Sem apostila, os trechos saíram de "Outros materiais" (ex: um Desafio
+    # Profissional): o rótulo fala em "material" e o que não foi encontrado
+    # não aparece.
+    where = "da apostila" if insights.from_apostila else "do material"
+    with st.expander(f"📎 Extrações {where} (referências, dicas, desafio)"):
         pairs = (
-            ("Referências Bibliográficas", session.apostila_insights.referencias_bibliograficas),
-            ("Dicas / Indicações de Leitura", session.apostila_insights.dicas_leitura),
-            ("Desafio Prático", session.apostila_insights.desafio_pratico),
+            ("Referências Bibliográficas", insights.referencias_bibliograficas),
+            ("Dicas / Indicações de Leitura", insights.dicas_leitura),
+            ("Desafio Prático", insights.desafio_pratico),
         )
         for label, extracted in pairs:
-            st.markdown(f"**{label}** — {_METHOD_LABELS[extracted.method]}")
+            if not insights.from_apostila and extracted.method == ExtractionMethod.NAO_ENCONTRADO:
+                continue
+            method_label = _METHOD_LABELS[extracted.method]
+            if not insights.from_apostila:
+                method_label = method_label.replace("na apostila", "no material")
+            st.markdown(f"**{label}** — {method_label}")
             st.write(extracted.content or "_(não encontrado)_")
 
 

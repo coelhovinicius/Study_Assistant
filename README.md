@@ -1,9 +1,11 @@
 # Study Assistant
 
-Automação pessoal do fluxo de estudo descrito no chat: você sobe a
-apostila (e, opcionalmente, livro, audiodescrição do podcast e outros
-materiais), o app extrai automaticamente as referências bibliográficas, as
-dicas/indicações de leitura e o desafio prático da apostila, manda tudo
+Automação pessoal do fluxo de estudo descrito no chat: você sobe os
+materiais da aula — apostila, livro, audiodescrição do podcast e/ou outros
+materiais (basta um arquivo, em qualquer campo; PDF, DOCX, TXT, MD ou
+HTML) —, o app extrai automaticamente as referências bibliográficas, as
+dicas/indicações de leitura e o desafio prático (da apostila e dos
+documentos de "Outros materiais", como um Desafio Profissional), manda tudo
 — em lotes que cabem na cota por minuto das IAs gratuitas — para uma
 cascata de provedores de IA (Gemini → Groq → Groq 2 → Mistral → OpenAI →
 Groq 3, com fallback automático caso um falhe — via webhook do seu n8n,
@@ -232,13 +234,23 @@ streamlit run app.py
 
 1. **Upload** (`presentation/pages_/upload_analysis_page.py`) — você sobe
    os arquivos, separados por tipo (Apostila / Livro / Podcast / Outros).
-2. **Extração de texto** (`infrastructure/extractors/`) — PDF, TXT e DOCX
-   viram texto puro.
-3. **Extração das 3 seções da apostila**
-   (`application/extraction_service.py`) — primeiro tenta achar por
-   cabeçalhos comuns (rápido, sem custo de IA); o que não achar, a IA
-   procura na apostila lote a lote, com uma chamada por lote pedindo
-   todas as seções que faltam de uma vez.
+   Nenhum campo é obrigatório: basta um arquivo em qualquer um deles (e o
+   título da sessão).
+2. **Extração de texto** (`infrastructure/extractors/`) — PDF, DOCX, TXT,
+   MD e HTML viram texto puro (do HTML, só o texto visível — sem tags,
+   scripts nem estilos).
+3. **Referências, dicas e desafio** (`application/extraction_service.py`)
+   — procurados na apostila e em cada documento de "Outros materiais"
+   (livros e podcast ficam de fora: são grandes e não trazem o desafio da
+   aula). Primeiro por cabeçalhos (`application/apostila_heuristics.py`,
+   ajustados às apostilas Kroton: "Teoria em Prática", "Reflita sobre a
+   seguinte situação", "Dica do Professor", "Leitura Fundamental",
+   "Desafio Profissional"...) — rápido, sem custo de IA; o que não achar,
+   a IA procura lote a lote, com uma chamada por lote pedindo todas as
+   seções que faltam de uma vez. Um desafio encontrado em qualquer desses
+   documentos é resolvido; havendo mais de um, cada trecho leva o nome do
+   arquivo. Sem apostila, o que não foi encontrado simplesmente não aparece
+   no resultado (nada de "não encontrado na apostila enviada").
 4. **Análise em lotes** (`application/analysis_service.py`) — uma chamada
    por lote de cada material e mais 4 pequenas para referências, dicas,
    desafio e síntese (ver "Análise em lotes" no Setup). A tela mostra em

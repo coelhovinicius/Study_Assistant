@@ -161,6 +161,14 @@ class ReportOutline:
     materials: list[MaterialItem]
     insights: list[InsightItem]
     sections: list[tuple[str, str]]
+    insights_title: str = "Extrações da Apostila"
+
+
+def insights_title(from_apostila: bool) -> str:
+    """Título do bloco de referências/dicas/desafio extraídos. Sem apostila
+    na análise, eles saíram de "Outros materiais" (ex: um Desafio
+    Profissional) — falar em "apostila" ali seria errado."""
+    return "Extrações da Apostila" if from_apostila else "Extrações do Material"
 
 
 def build_report_outline(session: StudySession) -> ReportOutline:
@@ -173,18 +181,25 @@ def build_report_outline(session: StudySession) -> ReportOutline:
     ]
 
     insights: list[InsightItem] = []
+    from_apostila = True
     if session.apostila_insights:
+        from_apostila = session.apostila_insights.from_apostila
         pairs = (
             ("Referências Bibliográficas", session.apostila_insights.referencias_bibliograficas),
             ("Dicas / Indicações de Leitura", session.apostila_insights.dicas_leitura),
             ("Desafio Prático (norte para a resolução)", session.apostila_insights.desafio_pratico),
         )
         for label, section in pairs:
+            if not from_apostila and section.method == ExtractionMethod.NAO_ENCONTRADO:
+                continue  # sem apostila, o que não foi encontrado não aparece
+            method_label = _EXTRACTION_METHOD_LABELS.get(section.method, "")
+            if not from_apostila:
+                method_label = method_label.replace("na apostila", "no material")
             insights.append(
                 InsightItem(
                     label=label,
                     content=_reflow_paragraphs(section.content) or "(não encontrado)",
-                    method_label=_EXTRACTION_METHOD_LABELS.get(section.method, ""),
+                    method_label=method_label,
                 )
             )
 
@@ -201,4 +216,5 @@ def build_report_outline(session: StudySession) -> ReportOutline:
         materials=materials,
         insights=insights,
         sections=sections,
+        insights_title=insights_title(from_apostila),
     )

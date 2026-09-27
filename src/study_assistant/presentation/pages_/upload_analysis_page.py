@@ -7,6 +7,7 @@ from __future__ import annotations
 import streamlit as st
 
 from study_assistant.application.document_service import UploadedFile
+from study_assistant.application.extraction_service import merge_insights
 from study_assistant.domain.entities import MaterialType, StudySession
 from study_assistant.domain.exceptions import (
     AllProvidersFailedError,
@@ -19,7 +20,7 @@ from study_assistant.presentation.components import render_full_result
 from study_assistant.presentation.di_container import AppContainer
 from study_assistant.presentation.theme import render_unsaved_changes_guard, themed_button
 
-_ACCEPTED_TYPES = ["pdf", "txt", "docx"]
+_ACCEPTED_TYPES = ["pdf", "docx", "txt", "md", "html", "htm"]
 _SESSION_STATE_KEY = "current_study_session"
 # Sufixo numérico anexado à key= do título e dos 4 uploaders. O Streamlit
 # mantém o valor de um widget associado à sua key= entre reruns — recriar o
@@ -55,16 +56,17 @@ def has_unsaved_analysis() -> bool:
     return session is not None and not session.saved
 
 
-def _missing_for_analysis(title: str, apostila_files) -> list[str]:
+def _missing_for_analysis(title: str, uploaded_file_lists) -> list[str]:
     """O que ainda falta pra liberar "Analisar materiais". O título é
     obrigatório (pedido do usuário) — antes, sem título, a sessão ganhava
     um genérico "Sessão de estudo — <data>", difícil de achar depois no
-    histórico."""
+    histórico. A apostila deixou de ser obrigatória (também pedido do
+    usuário): basta um arquivo em qualquer um dos campos."""
     missing = []
     if not title.strip():
         missing.append("preencha o título da sessão")
-    if not apostila_files:
-        missing.append("envie ao menos um arquivo de Apostila")
+    if not any(uploaded_file_lists):
+        missing.append("envie ao menos um arquivo, em qualquer um dos campos")
     return missing
 
 
@@ -146,10 +148,11 @@ def render_upload_analysis_page(container: AppContainer) -> None:
 
     st.header("📚 Nova análise de estudo")
     st.caption(
-        "Dê um título à sessão e suba os materiais desta matéria/aula. O "
-        "título e a apostila são obrigatórios (é da apostila que as "
-        "referências, dicas e o desafio são extraídos); os demais são "
-        "opcionais."
+        "Dê um título à sessão e suba os materiais desta matéria/aula — "
+        "basta um arquivo, em qualquer campo (PDF, DOCX, TXT, MD ou HTML). "
+        "Referências, dicas de leitura e desafio prático são procurados na "
+        "apostila e nos documentos de \"Outros materiais\" (ex: um Desafio "
+        "Profissional) — e o desafio encontrado é resolvido."
     )
 
     _, new_analysis_col = st.columns([4, 1])
@@ -190,21 +193,21 @@ def render_upload_analysis_page(container: AppContainer) -> None:
         )
     with col2:
         livro_files = st.file_uploader(
-            "Livro (opcional)",
+            "Livro",
             type=_ACCEPTED_TYPES,
             accept_multiple_files=True,
             key=f"uploader_livro_{version}",
             disabled=is_busy,
         )
         outros_files = st.file_uploader(
-            "Outros materiais (opcional)",
+            "Outros materiais",
             type=_ACCEPTED_TYPES,
             accept_multiple_files=True,
             key=f"uploader_outros_{version}",
             disabled=is_busy,
         )
 
-    missing = _missing_for_analysis(title, apostila_files)
+    missing = _missing_for_analysis(title, [apostila_files, livro_files, podcast_files, outros_files])
     can_analyze = not missing
     if not is_analyzing and not can_analyze:
         st.info(f"Para habilitar a análise, {' e '.join(missing)}.")
@@ -261,15 +264,45 @@ def _build_uploaded_files(apostila_files, livro_files, podcast_files, outros_fil
     return uploaded_files
 
 
+def _extract_insights(container: AppContainer, materials, progress):
+    """Referências, dicas e desafio: da apostila (como sempre) e de cada
+    documento em "Outros materiais" — é lá que vai parar um "Desafio
+    Profissional" ou um "Reflita sobre a seguinte situação", e o desafio
+    dele também tem que ser resolvido. Livros e podcast ficam de fora: são
+    grandes e não trazem o desafio da aula. Sem apostila e sem nada
+    encontrado nos outros documentos, volta None e a análise sai sem essas
+    seções (em vez de "não encontrado na apostila enviada")."""
+    apostilas = [m for m in materials if m.material_type is MaterialType.APOSTILA]
+    parts = []
+    if apostilas:
+        apostila_text = "\n\n".join(m.raw_text for m in apostilas)
+        parts.append(
+            (
+                ", ".join(m.filename for m in apostilas),
+                container.extraction_use_case.execute(apostila_text, progress=progress),
+            )
+        )
+    for material in (m for m in materials if m.material_type is MaterialType.OUTRO):
+        parts.append(
+            (
+                material.filename,
+                container.extraction_use_case.execute(
+                    material.raw_text,
+                    progress=progress,
+                    location=f'em "{material.filename}"',
+                    is_apostila=False,
+                ),
+            )
+        )
+    return merge_insights(parts, from_apostila=bool(apostilas))
+
+
 def _do_pipeline_work(container: AppContainer, uploaded_files: list[UploadedFile], progress=None):
     materials = container.document_service.ingest(uploaded_files)
     # Respostas de IA guardadas há mais de alguns dias não servem mais pra
     # continuar nada — limpa antes de começar (falha aqui não trava nada).
     container.ai_caller.purge_expired()
-    apostila_text = "\n\n".join(
-        m.raw_text for m in materials if m.material_type is MaterialType.APOSTILA
-    )
-    insights = container.extraction_use_case.execute(apostila_text, progress=progress)
+    insights = _extract_insights(container, materials, progress)
     analysis = container.analysis_use_case.execute(materials, insights, progress=progress)
     return materials, insights, analysis
 

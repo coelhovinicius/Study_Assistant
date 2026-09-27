@@ -38,6 +38,7 @@ from study_assistant.infrastructure.ai_providers import (
 from study_assistant.infrastructure.extractors import (
     CompositeTextExtractor,
     DocxTextExtractor,
+    HtmlTextExtractor,
     PdfTextExtractor,
     TxtTextExtractor,
 )
@@ -134,7 +135,7 @@ def build_container(settings: Settings) -> AppContainer:
     )
 
     text_extractor = CompositeTextExtractor(
-        [PdfTextExtractor(), TxtTextExtractor(), DocxTextExtractor()]
+        [PdfTextExtractor(), TxtTextExtractor(), DocxTextExtractor(), HtmlTextExtractor()]
     )
     document_service = DocumentIngestionService(text_extractor)
 

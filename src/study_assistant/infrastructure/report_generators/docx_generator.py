@@ -59,7 +59,7 @@ class DocxReportGenerator(ReportGenerator):
                 )
 
         if outline.insights:
-            document.add_heading("Extrações da Apostila", level=1)
+            document.add_heading(outline.insights_title, level=1)
             for insight in outline.insights:
                 document.add_heading(f"{insight.label}", level=2)
                 document.add_paragraph(f"({insight.method_label})").italic = True

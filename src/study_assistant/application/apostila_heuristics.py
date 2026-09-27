@@ -33,8 +33,16 @@ _HEADER_PATTERNS: dict[str, re.Pattern[str]] = {
         re.IGNORECASE,
     ),
     "desafio_pratico": re.compile(
+        # "Teoria em Prática" e "Reflita sobre a seguinte situação" abrem o
+        # ENUNCIADO do desafio nas apostilas Kroton do usuário — vêm antes do
+        # "Norte para a resolução", que é só a orientação. Sem eles, só a
+        # orientação era extraída e a IA resolvia o desafio sem conhecer a
+        # situação proposta. "Desafio Profissional", "Desafio Proposto" e
+        # "Exercício Proposto" abrem os documentos de desafio avulsos dele.
         r"\b(?:desafio\s+pratico|resolucao\s+do\s+desafio|"
-        r"atividade\s+pratica|norte\s+para\s+a\s+resolucao)\b",
+        r"atividade\s+pratica|norte\s+para\s+a\s+resolucao|teoria\s+em\s+pratica|"
+        r"reflita\s+sobre\s+a\s+seguinte\s+situacao|desafio\s+profissional|"
+        r"desafio\s+proposto|exercicio\s+proposto)\b",
         re.IGNORECASE,
     ),
 }
@@ -42,6 +50,9 @@ _HEADER_PATTERNS: dict[str, re.Pattern[str]] = {
 # Prefixo aceitável antes do cabeçalho na mesma linha (numeração, marcadores, etc.)
 _MAX_LINE_PREFIX_LENGTH = 20
 _LINE_PREFIX_STRIP_CHARS = " .:-–—•\t0123456789"
+# Fim de frase seguido de texto ("...profissional. A ") — numeração como
+# "1. " ou "3.2. " não conta (antes do ponto vem dígito, não letra).
+_SENTENCE_BOUNDARY = re.compile(r"[^\W\d_][.!?]\s+\S")
 # E o que pode vir depois dele na mesma linha ("Indicação de leitura 1").
 # Uma linha de cabeçalho também não é uma frase terminada em ponto:
 # "exemplos e referências na história." (meio do texto) era tomada pelo
@@ -50,11 +61,16 @@ _LINE_PREFIX_STRIP_CHARS = " .:-–—•\t0123456789"
 # frase — "Norte para a resolução..." é cabeçalho de verdade.
 _MAX_LINE_SUFFIX_LENGTH = 40
 
-# Marca de layout que vem logo abaixo de "Dica do Professor" nas apostilas
-# Kroton do usuário ("Bloco 5" + o nome do professor, em linhas próprias) —
-# não é conteúdo da dica. Só sai se for exatamente isso: "Bloco N" sozinho
-# na linha e, embaixo, uma linha curta sem pontuação final (um nome).
-_LAYOUT_BYLINE = re.compile(r"\A\s*bloco\s+\d+\s*\n[^\n.:;!?]{1,60}\n", re.IGNORECASE)
+# Marca de layout que vem logo abaixo de "Dica do Professor" e de "Teoria em
+# Prática" nas apostilas Kroton do usuário: "Bloco 5" + o nome do professor,
+# em linhas próprias — às vezes com o título do slide antes, quebrado em até
+# 3 linhas ("Técnicas de usabilidade: \nmelhorando a qualidade da
+# \nexperiência do usuário\nBloco 4\nAriel Dias"). Não é conteúdo da seção.
+# Só sai se for exatamente isso: "Bloco N" sozinho na linha e, embaixo, uma
+# linha curta sem pontuação final (um nome).
+_LAYOUT_BYLINE = re.compile(
+    r"\A\s*(?:[^\n]{1,100}\n\s*){0,3}bloco\s+\d+\s*\n[^\n.:;!?]{1,60}\n", re.IGNORECASE
+)
 
 
 @lru_cache(maxsize=None)
@@ -89,6 +105,11 @@ def _is_plausible_header_position(folded_text: str, match_start: int, match_end:
     prefix = folded_text[line_start:match_start]
     suffix = folded_text[match_end:line_end]
     if len(prefix.strip(_LINE_PREFIX_STRIP_CHARS)) > _MAX_LINE_PREFIX_LENGTH:
+        return False
+    # Uma frase terminando antes, na mesma linha, = meio de parágrafo, não
+    # cabeçalho: "profissional. A resolução do Desafio não precisará ser
+    # postada ou" era tomada pelo cabeçalho do desafio (documentos reais).
+    if _SENTENCE_BOUNDARY.search(prefix):
         return False
     if len(suffix.strip(_LINE_PREFIX_STRIP_CHARS)) > _MAX_LINE_SUFFIX_LENGTH:
         return False

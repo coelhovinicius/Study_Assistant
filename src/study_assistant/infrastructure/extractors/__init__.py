@@ -3,6 +3,7 @@
 """
 
 from study_assistant.infrastructure.extractors.docx_extractor import DocxTextExtractor
+from study_assistant.infrastructure.extractors.html_extractor import HtmlTextExtractor
 from study_assistant.infrastructure.extractors.pdf_extractor import PdfTextExtractor
 from study_assistant.infrastructure.extractors.txt_extractor import TxtTextExtractor
 from study_assistant.infrastructure.extractors.composite_extractor import (
@@ -11,6 +12,7 @@ from study_assistant.infrastructure.extractors.composite_extractor import (
 
 __all__ = [
     "DocxTextExtractor",
+    "HtmlTextExtractor",
     "PdfTextExtractor",
     "TxtTextExtractor",
     "CompositeTextExtractor",

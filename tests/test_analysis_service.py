@@ -221,3 +221,52 @@ def test_resposta_da_ia_em_lista_vira_texto_legivel_na_secao() -> None:
     result = _use_case(ScriptedAIProvider(responder)).execute([_material(_pages("p1"))], _FOUND)
 
     assert result.sections["analise_referencias_bibliograficas"] == "SATO, D. 2014.\nCI e CD."
+
+
+# --- análise sem apostila (pedido do usuário: qualquer documento serve) ---
+
+
+def test_sem_apostila_so_analisa_os_materiais_e_faz_a_sintese() -> None:
+    """Referências, dicas e desafio vêm da apostila: sem ela, essas seções
+    não aparecem — nem chamada à IA, nem "não encontrado na apostila"."""
+    provider = ScriptedAIProvider(_responder)
+    livro = _material(_pages("l1"), kind=MaterialType.LIVRO, filename="livro.pdf")
+
+    result = _use_case(provider).execute([livro], None)
+
+    assert result.sections["analise_livro"] == "Análise de l1."
+    assert result.sections["sintese_geral"] == "Síntese de tudo."
+    for key in ("analise_apostila", "analise_referencias_bibliograficas", "analise_dicas_leitura", "analise_e_resolucao_desafio"):
+        assert result.sections[key] == ""
+    assert len(provider.prompts) == 2  # o lote do livro + a síntese
+
+
+def test_sem_apostila_o_progresso_conta_as_etapas_certas() -> None:
+    messages: list[str] = []
+    outro = _material(_pages("o1"), kind=MaterialType.OUTRO, filename="artigo.pdf")
+
+    _use_case(ScriptedAIProvider(_responder)).execute(
+        [outro], None, progress=lambda m, done=False: messages.append(m) if done else None
+    )
+
+    assert messages == ["✅ Etapa 1 de 2: Outro material", "✅ Etapa 2 de 2: escrevendo a síntese geral"]
+
+
+def test_sem_apostila_com_desafio_de_outros_resolve_o_desafio_e_omite_o_resto() -> None:
+    """Ex: só um Desafio Profissional em "Outros": o desafio é resolvido;
+    referências e dicas (não encontradas) nem aparecem."""
+    provider = ScriptedAIProvider(_responder)
+    insights = ApostilaInsights(
+        referencias_bibliograficas=ExtractedSection("", ExtractionMethod.NAO_ENCONTRADO),
+        dicas_leitura=ExtractedSection("", ExtractionMethod.NAO_ENCONTRADO),
+        desafio_pratico=ExtractedSection("Caso da startup de e-commerce.", ExtractionMethod.IA),
+        from_apostila=False,
+    )
+    desafio = _material(_pages("d1"), kind=MaterialType.OUTRO, filename="desafio_profissional.pdf")
+
+    result = _use_case(provider).execute([desafio], insights)
+
+    assert result.sections["analise_e_resolucao_desafio"] == "Resolução do desafio."
+    assert result.sections["analise_referencias_bibliograficas"] == ""
+    assert result.sections["analise_dicas_leitura"] == ""
+    assert len(provider.prompts) == 3  # o lote do documento + o desafio + a síntese

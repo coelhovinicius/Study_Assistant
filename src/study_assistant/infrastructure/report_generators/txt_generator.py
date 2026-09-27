@@ -36,7 +36,7 @@ class TxtReportGenerator(ReportGenerator):
             lines.append("")
 
         if outline.insights:
-            lines.append("EXTRAÇÕES DA APOSTILA")
+            lines.append(outline.insights_title.upper())
             lines.append("-" * 40)
             for insight in outline.insights:
                 lines.append(f"### {insight.label} ({insight.method_label})")

@@ -82,16 +82,42 @@ parte ou um trecho — escreva a análise como um estudo daquele conteúdo.
 """
 
 
+# Só pra documentos que não são apostila (ex: "Outros materiais"): lá o
+# desafio raramente vem com um cabeçalho reconhecível — vem como estudo de
+# caso, "Reflita sobre a seguinte situação", "Desafio Profissional"... (visto
+# nos documentos reais do usuário). E uma "Proposta de Resolução" não é o
+# desafio: é a resposta dele.
+_NON_APOSTILA_CHALLENGE_HINT = """
+Um desafio pode vir como estudo de caso, "Reflita sobre a seguinte
+situação", "Desafio Profissional", "Desafio Proposto" ou exercício proposto:
+transcreva o enunciado completo (a situação e o que é pedido). Se o texto é
+a RESOLUÇÃO de um desafio (e não o enunciado), não a transcreva como desafio.
+"""
+
+
 def build_batch_extraction_prompt(
-    *, sections: dict[str, str], part_number: int, part_count: int, text: str
+    *,
+    sections: dict[str, str],
+    part_number: int,
+    part_count: int,
+    text: str,
+    document_kind: str = "uma apostila",
 ) -> str:
-    """Procura, num lote da apostila, as seções que a heurística por
-    cabeçalhos não encontrou (``sections``: chave do JSON -> nome da seção)."""
+    """Procura, num lote do documento, as seções que a heurística por
+    cabeçalhos não encontrou (``sections``: chave do JSON -> nome da seção).
+    ``document_kind``: "uma apostila" ou "um material de estudo" (documento
+    de "Outros materiais"). Pra apostila, o texto é exatamente o de antes —
+    as respostas já salvas continuam valendo."""
     wanted = "\n".join(f'- "{key}": {label}' for key, label in sections.items())
     where = (
-        f"O texto abaixo é a parte {part_number} de {part_count} de uma apostila."
+        f"O texto abaixo é a parte {part_number} de {part_count} de {document_kind}."
         if part_count > 1
-        else "O texto abaixo é uma apostila."
+        else f"O texto abaixo é {document_kind}."
+    )
+    hint = (
+        _NON_APOSTILA_CHALLENGE_HINT
+        if document_kind != "uma apostila" and "desafio_pratico" in sections
+        else ""
     )
     return f"""IMPORTANTE: responda exclusivamente em Português do Brasil (pt-BR).
 
@@ -100,7 +126,7 @@ resuma de forma fiel, se o conteúdo estiver espalhado) o que encontrar.
 
 SEÇÕES PROCURADAS (chave do JSON: seção):
 {wanted}
-
+{hint}
 Responda apenas com um objeto JSON com exatamente essas chaves. Use string
 vazia "" para a seção que NÃO aparece neste texto — não invente.
 

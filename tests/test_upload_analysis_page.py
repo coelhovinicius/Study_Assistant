@@ -33,7 +33,13 @@ from types import SimpleNamespace
 import pytest
 import streamlit as st
 
-from study_assistant.domain.entities import MaterialType, StudySession
+from study_assistant.domain.entities import (
+    ApostilaInsights,
+    ExtractedSection,
+    ExtractionMethod,
+    MaterialType,
+    StudySession,
+)
 from study_assistant.domain.exceptions import (
     AllProvidersFailedError,
     AnalysisPausedError,
@@ -53,23 +59,25 @@ def setup_function() -> None:
 # --- título obrigatório pra liberar "Analisar materiais" -----------------
 
 
-def _render_form(monkeypatch, *, title: str, apostila_files: list) -> dict:
-    """Renderiza a página em bare mode com o título e a apostila dados, e
+def _render_form(monkeypatch, *, title: str, apostila_files: list = (), **files_by_field: list) -> dict:
+    """Renderiza a página em bare mode com o título e os arquivos dados
+    (``files_by_field``: livro=[...], podcast=[...], outros=[...]), e
     devolve o que interessa: os kwargs do botão "Analisar materiais" e os
     avisos st.info exibidos."""
     captured = {"analyze_button": None, "infos": []}
+    files_by_field = {"apostila": list(apostila_files), **files_by_field}
 
     def _button(label, *args, **kwargs):
         if kwargs.get("key") == "btn_analyze":
             captured["analyze_button"] = {"label": label, **kwargs}
         return False
 
+    def _file_uploader(label, *args, **kwargs):
+        field = kwargs["key"].split("_")[1]  # "uploader_<campo>_<versão>"
+        return files_by_field.get(field, [])
+
     monkeypatch.setattr(st, "text_input", lambda *a, **k: title)
-    monkeypatch.setattr(
-        st,
-        "file_uploader",
-        lambda label, *a, **k: apostila_files if k["key"].startswith("uploader_apostila_") else [],
-    )
+    monkeypatch.setattr(st, "file_uploader", _file_uploader)
     monkeypatch.setattr(st, "button", _button)
     monkeypatch.setattr(st, "info", lambda text, *a, **k: captured["infos"].append(text))
     monkeypatch.setattr(page, "render_unsaved_changes_guard", lambda **kwargs: None)
@@ -86,19 +94,29 @@ def test_analisar_fica_desabilitado_sem_titulo_mesmo_com_apostila(monkeypatch, t
     assert captured["infos"] == ["Para habilitar a análise, preencha o título da sessão."]
 
 
-def test_analisar_fica_desabilitado_sem_apostila_mesmo_com_titulo(monkeypatch) -> None:
-    captured = _render_form(monkeypatch, title="Direito Constitucional", apostila_files=[])
+def test_analisar_fica_desabilitado_sem_nenhum_arquivo_mesmo_com_titulo(monkeypatch) -> None:
+    captured = _render_form(monkeypatch, title="Direito Constitucional")
 
     assert captured["analyze_button"]["disabled"] is True
-    assert captured["infos"] == ["Para habilitar a análise, envie ao menos um arquivo de Apostila."]
+    assert captured["infos"] == ["Para habilitar a análise, envie ao menos um arquivo, em qualquer um dos campos."]
 
 
-def test_aviso_lista_titulo_e_apostila_quando_faltam_os_dois(monkeypatch) -> None:
-    captured = _render_form(monkeypatch, title="", apostila_files=[])
+def test_aviso_lista_titulo_e_arquivo_quando_faltam_os_dois(monkeypatch) -> None:
+    captured = _render_form(monkeypatch, title="")
 
     assert captured["infos"] == [
-        "Para habilitar a análise, preencha o título da sessão e envie ao menos um arquivo de Apostila."
+        "Para habilitar a análise, preencha o título da sessão e envie ao menos um arquivo, em qualquer um dos campos."
     ]
+
+
+@pytest.mark.parametrize("field", ["livro", "podcast", "outros"])
+def test_apostila_nao_e_mais_obrigatoria_qualquer_campo_libera_a_analise(monkeypatch, field) -> None:
+    """Pedido do usuário: a análise pode partir de qualquer documento, de
+    qualquer tipo — sem precisar de apostila."""
+    captured = _render_form(monkeypatch, title="Artigo sobre DevOps", **{field: ["documento.pdf"]})
+
+    assert captured["analyze_button"]["disabled"] is False
+    assert captured["infos"] == []
 
 
 def test_botao_vira_continuar_analise_quando_a_analise_esta_pausada(monkeypatch) -> None:
@@ -168,7 +186,7 @@ def _pipeline_container(
 def test_do_pipeline_work_encadeia_ingest_extracao_e_analise() -> None:
     calls = []
 
-    fake_material = SimpleNamespace(material_type=MaterialType.APOSTILA, raw_text="texto da apostila")
+    fake_material = SimpleNamespace(filename="apostila.pdf", material_type=MaterialType.APOSTILA, raw_text="texto da apostila")
 
     def ingest(files):
         calls.append(("ingest", files))
@@ -197,7 +215,9 @@ def test_do_pipeline_work_encadeia_ingest_extracao_e_analise() -> None:
 def test_do_pipeline_work_repassa_o_progresso_para_a_extracao_e_a_analise() -> None:
     received = []
     progress = object()
+    apostila = SimpleNamespace(filename="apostila.pdf", material_type=MaterialType.APOSTILA, raw_text="texto da apostila")
     container = _pipeline_container(
+        ingest=lambda files: [apostila],
         extract=lambda text, progress=None: received.append(progress),
         analyze=lambda materials, insights, progress=None: received.append(progress),
     )
@@ -207,11 +227,30 @@ def test_do_pipeline_work_repassa_o_progresso_para_a_extracao_e_a_analise() -> N
     assert received == [progress, progress]
 
 
+def test_sem_apostila_nao_ha_extracao_e_a_analise_recebe_insights_vazio() -> None:
+    """Sem apostila não há de onde tirar referências, dicas e desafio: nada
+    de extração (nem de chamada à IA pra isso), e a análise recebe None."""
+    extraction_calls = []
+    analysis_calls = []
+    livro = SimpleNamespace(material_type=MaterialType.LIVRO, raw_text="texto do livro")
+    container = _pipeline_container(
+        ingest=lambda files: [livro],
+        extract=lambda text, progress=None: extraction_calls.append(text),
+        analyze=lambda materials, insights, progress=None: analysis_calls.append((materials, insights)) or "analysis",
+    )
+
+    materials, insights, analysis = page._do_pipeline_work(container, uploaded_files=[])
+
+    assert extraction_calls == []
+    assert insights is None
+    assert analysis_calls == [([livro], None)]
+
+
 # --- _run_analysis: execução síncrona + tratamento de erro ---------------
 
 
 def test_run_analysis_com_sucesso_cria_a_sessao_e_desliga_o_flag() -> None:
-    fake_material = SimpleNamespace(material_type=MaterialType.APOSTILA, raw_text="texto")
+    fake_material = SimpleNamespace(filename="apostila.pdf", material_type=MaterialType.APOSTILA, raw_text="texto")
 
     container = _pipeline_container(
         ingest=lambda files: [fake_material],
@@ -459,3 +498,57 @@ def test_has_unsaved_analysis_reflete_a_sessao_atual() -> None:
 
     st.session_state[page._SESSION_STATE_KEY] = StudySession(title="t", materials=[], saved=True)
     assert page.has_unsaved_analysis() is False
+
+
+# --- de onde saem referências, dicas e desafio ----------------------------
+
+
+def _material_ns(filename, kind, text="texto"):
+    return SimpleNamespace(filename=filename, material_type=kind, raw_text=text)
+
+
+def _recording_extraction(calls):
+    def execute(text, progress=None, location="na apostila", is_apostila=True):
+        calls.append({"text": text, "location": location, "is_apostila": is_apostila})
+        found = ExtractedSection(f"desafio de {location}", ExtractionMethod.IA)
+        missing = ExtractedSection("", ExtractionMethod.NAO_ENCONTRADO)
+        return ApostilaInsights(missing, missing, found, from_apostila=is_apostila)
+
+    return execute
+
+
+def test_extracao_roda_na_apostila_e_em_cada_documento_de_outros_mas_nao_em_livro_e_podcast() -> None:
+    calls = []
+    materials = [
+        _material_ns("apostila.pdf", MaterialType.APOSTILA, "texto da apostila"),
+        _material_ns("livro.pdf", MaterialType.LIVRO),
+        _material_ns("podcast.pdf", MaterialType.AUDIODESCRICAO_PODCAST),
+        _material_ns("desafio_profissional.pdf", MaterialType.OUTRO, "texto do desafio"),
+    ]
+    container = _pipeline_container(ingest=lambda files: materials, extract=_recording_extraction(calls))
+
+    _, insights, _ = page._do_pipeline_work(container, uploaded_files=[])
+
+    assert calls == [
+        {"text": "texto da apostila", "location": "na apostila", "is_apostila": True},
+        {"text": "texto do desafio", "location": 'em "desafio_profissional.pdf"', "is_apostila": False},
+    ]
+    assert insights.from_apostila is True
+    assert "### desafio_profissional.pdf" in insights.desafio_pratico.content
+
+
+def test_sem_apostila_o_desafio_de_outros_materiais_entra_na_analise() -> None:
+    calls = []
+    analyzed = []
+    container = _pipeline_container(
+        ingest=lambda files: [_material_ns("desafio_profissional.pdf", MaterialType.OUTRO, "caso")],
+        extract=_recording_extraction(calls),
+        analyze=lambda materials, insights, progress=None: analyzed.append(insights) or "analysis",
+    )
+
+    _, insights, _ = page._do_pipeline_work(container, uploaded_files=[])
+
+    assert calls[0]["is_apostila"] is False
+    assert insights.from_apostila is False
+    assert insights.desafio_pratico.content == 'desafio de em "desafio_profissional.pdf"'
+    assert analyzed == [insights]

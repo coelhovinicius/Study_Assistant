@@ -7,8 +7,8 @@ import json
 
 from study_assistant.application.ai_caller import ResilientAICaller
 from study_assistant.application.apostila_heuristics import extract_sections_heuristically
-from study_assistant.application.extraction_service import ExtractApostilaInsightsUseCase
-from study_assistant.domain.entities import ExtractionMethod
+from study_assistant.application.extraction_service import ExtractApostilaInsightsUseCase, merge_insights
+from study_assistant.domain.entities import ApostilaInsights, ExtractedSection, ExtractionMethod
 from study_assistant.infrastructure.ai_providers.cascade import AIProviderCascade
 from tests.fixtures.fake_ai_provider import ScriptedAIProvider
 from tests.fixtures.in_memory_ai_response_store import FakeClock, InMemoryAIResponseStore
@@ -238,3 +238,149 @@ def test_linha_bloco_seguida_de_frase_nao_e_removida() -> None:
     apostila = "Dica do Professor\nBloco 5\nLeia o capítulo 3 do livro.\n\nReferências\nSATO, D. 2014."
 
     assert extract_sections_heuristically(apostila)["dicas_leitura"].startswith("Bloco 5")
+
+
+# --- "Outros materiais": o desafio de um Desafio Profissional é achado ------
+
+
+def _insights(*, refs="", dicas="", desafio="", method=ExtractionMethod.HEURISTICA, from_apostila=True):
+    def section(content):
+        return ExtractedSection(content, method if content else ExtractionMethod.NAO_ENCONTRADO)
+
+    return ApostilaInsights(section(refs), section(dicas), section(desafio), from_apostila=from_apostila)
+
+
+def test_merge_com_so_a_apostila_devolve_ela_mesma() -> None:
+    apostila = _insights(refs="SATO, D. 2014.")
+
+    assert merge_insights([("apostila.pdf", apostila)], from_apostila=True) is apostila
+
+
+def test_merge_sem_apostila_e_sem_nada_encontrado_devolve_none() -> None:
+    nothing = _insights(from_apostila=False)
+
+    assert merge_insights([("artigo.pdf", nothing), ("notas.md", nothing)], from_apostila=False) is None
+    assert merge_insights([("artigo.pdf", nothing)], from_apostila=False) is None
+    assert merge_insights([], from_apostila=False) is None
+
+
+def test_merge_junta_o_desafio_da_apostila_e_o_de_outros_com_o_nome_de_cada_arquivo() -> None:
+    merged = merge_insights(
+        [
+            ("apostila.pdf", _insights(refs="SATO, D. 2014.", desafio="Desafio da apostila.")),
+            ("desafio_profissional.pdf", _insights(desafio="Caso da startup.", method=ExtractionMethod.IA, from_apostila=False)),
+        ],
+        from_apostila=True,
+    )
+
+    assert merged.desafio_pratico.content == (
+        "### apostila.pdf\nDesafio da apostila.\n\n### desafio_profissional.pdf\nCaso da startup."
+    )
+    assert merged.desafio_pratico.method == ExtractionMethod.IA
+    assert merged.referencias_bibliograficas.content == "SATO, D. 2014."  # uma fonte só: sem o nome do arquivo
+    assert merged.dicas_leitura.method == ExtractionMethod.NAO_ENCONTRADO
+    assert merged.from_apostila is True
+
+
+def test_desafio_de_outros_materiais_sem_apostila_e_encontrado_pela_ia() -> None:
+    """Um enunciado sem cabeçalho nenhum (como "Desafio 1 Software
+    Financeiro.pdf" do usuário): a IA acha o enunciado; e o prompt diz a ela
+    que é um material de estudo, não uma apostila, e que uma Proposta de
+    Resolução não é o desafio."""
+    provider = ScriptedAIProvider(lambda prompt: _answer(desafio_pratico="Reflita: startup de e-commerce."))
+    documento = "Você foi contratado como consultor por uma startup de e-commerce.\nProponha a divisão das equipes."
+
+    insights = _use_case(provider).execute(documento, location='em "desafio.pdf"', is_apostila=False)
+
+    assert insights.from_apostila is False
+    assert insights.desafio_pratico.method == ExtractionMethod.IA
+    assert insights.desafio_pratico.content == "Reflita: startup de e-commerce."
+    assert "é um material de estudo" in provider.prompts[0]
+    assert "Proposta de Resolução" not in provider.prompts[0] or "RESOLUÇÃO de um desafio" in provider.prompts[0]
+    assert "Reflita sobre a seguinte" in provider.prompts[0]
+
+
+def test_prompt_de_extracao_da_apostila_continua_exatamente_igual() -> None:
+    """As respostas já salvas no banco são reaproveitadas pela impressão
+    digital do prompt: com apostila, ele não pode mudar nem uma vírgula."""
+    from study_assistant.config.prompts import build_batch_extraction_prompt
+
+    prompt = build_batch_extraction_prompt(
+        sections={"dicas_leitura": "Dicas"}, part_number=1, part_count=2, text="TEXTO"
+    )
+
+    assert prompt == (
+        "IMPORTANTE: responda exclusivamente em Português do Brasil (pt-BR).\n\n"
+        "O texto abaixo é a parte 1 de 2 de uma apostila. Procure nele as seções listadas e transcreva literalmente (ou\n"
+        "resuma de forma fiel, se o conteúdo estiver espalhado) o que encontrar.\n\n"
+        "SEÇÕES PROCURADAS (chave do JSON: seção):\n"
+        '- "dicas_leitura": Dicas\n\n'
+        "Responda apenas com um objeto JSON com exatamente essas chaves. Use string\n"
+        'vazia "" para a seção que NÃO aparece neste texto — não invente.\n\n'
+        "TEXTO:\n"
+        "TEXTO\n"
+    )
+
+
+# --- o enunciado do desafio (e não só a orientação) -----------------------
+
+
+def test_desafio_comeca_no_enunciado_e_nao_so_no_norte_para_a_resolucao() -> None:
+    """Regressão da apostila 5_4 DevOps: só o "Norte para a resolução" (a
+    orientação) era extraído — a situação proposta ficava de fora e a IA
+    resolvia um desafio que não conhecia."""
+    apostila = """
+Reflexão
+Qual a principal dificuldade em se adotar o DevOps?
+
+Teoria em Prática
+Desenvolvimento e gestão de
+projetos com DevOps
+Bloco 4
+Anderson da Silva Marcolino
+
+Reflita sobre a seguinte situação
+Um gerente tem dificuldades com duas equipes que se reúnem a cada quinze dias.
+
+Norte para a resolução...
+• Mudança cultural e não apenas um método.
+
+Dica do Professor
+Bloco 5
+Anderson da Silva Marcolino
+Leia a dissertação de Braga (2015).
+""".strip()
+
+    desafio = extract_sections_heuristically(apostila)["desafio_pratico"]
+
+    assert desafio.startswith("Reflita sobre a seguinte situação")  # sem título do slide nem "Bloco 4"
+    assert "duas equipes" in desafio
+    assert "Mudança cultural" in desafio  # a orientação continua junto
+    assert "Braga" not in desafio
+
+
+def test_documento_de_desafio_profissional_e_reconhecido_pelo_cabecalho() -> None:
+    documento = """
+EVOLUÇÃO DOS SOFTWARES
+WBA0452_v1.0
+Desafio Profissional
+Autoria: Anderson da Silva Marcolino
+Caro aluno, o presente Desafio Profissional é um material de auto estudo. A
+resolução do Desafio não precisará ser postada ou
+compartilhada no ambiente virtual.
+1. Caso – Ciclo de desenvolvimento de software
+""".strip()
+
+    desafio = extract_sections_heuristically(documento)["desafio_pratico"]
+
+    assert desafio.startswith("Autoria: Anderson")
+    assert "1. Caso" in desafio
+
+
+def test_trecho_depois_do_fim_de_uma_frase_na_mesma_linha_nao_e_cabecalho() -> None:
+    """Regressão: "...profissional. A resolução do Desafio não precisará ser
+    postada ou" era tomado como cabeçalho, e o desafio começava no meio de
+    uma frase."""
+    texto = "fazendo uma conexão com a prática profissional. A resolução do Desafio não precisará ser postada ou\ncompartilhada."
+
+    assert extract_sections_heuristically(texto) == {}
