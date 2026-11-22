@@ -12,6 +12,7 @@ import streamlit as st
 
 from study_assistant.domain.entities import ExtractionMethod, StudySession
 from study_assistant.presentation.di_container import AppContainer
+from study_assistant.shared.text_cleanup import clean_display_text
 
 _METHOD_LABELS = {
     ExtractionMethod.HEURISTICA: "🟢 encontrado diretamente na apostila",
@@ -62,7 +63,7 @@ def render_insights(session: StudySession) -> None:
             if not insights.from_apostila:
                 method_label = method_label.replace("na apostila", "no material")
             st.markdown(f"**{label}** — {method_label}")
-            st.write(extracted.content or "_(não encontrado)_")
+            st.write(clean_display_text(extracted.content) or "_(não encontrado)_")
 
 
 def render_analysis_sections(session: StudySession) -> None:
@@ -71,7 +72,7 @@ def render_analysis_sections(session: StudySession) -> None:
     for section_title, content in session.analysis_result.ordered_sections():
         expanded = section_title == "Análise e Resolução do Desafio Prático"
         with st.expander(section_title, expanded=expanded):
-            st.markdown(content)
+            st.markdown(clean_display_text(content))
 
 
 # Formatos escondidos da tela de download, mas que continuam registrados

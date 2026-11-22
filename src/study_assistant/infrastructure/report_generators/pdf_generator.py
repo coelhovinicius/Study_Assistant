@@ -9,14 +9,16 @@ clara sem recorrer a nada chamativo (sem gradientes, sem imagens grandes).
 
 from __future__ import annotations
 
+import functools
 import io
+import unicodedata
 
 from study_assistant.domain.entities import SECTION_SUBHEADING_PREFIX, StudySession
 from study_assistant.domain.exceptions import ReportGenerationError
 from study_assistant.domain.ports import ReportGenerator
 from study_assistant.infrastructure.report_generators.report_content import (
     build_report_outline,
-    split_bold,
+    split_inline,
     strip_bold,
 )
 
@@ -30,12 +32,11 @@ _MUTED_HEX = "#5a5a5a"
 
 
 # Caracteres que a Helvetica do reportlab NÃO tem e desenha como um
-# quadrado preto (■). O caso real: a IA escreve "diferenciando‑se",
-# "cliente‑servidor", "blue‑green" com o hífen que não quebra linha
-# (U+2011), e o PDF saía com um quadrado no lugar de cada hífen. Cada um
-# vira o equivalente que a fonte tem. Levantado desenhando cada caractere
-# num PDF de teste — setas, aspas curvas, "–", "—", "•", "≥", "✓" e letras
-# gregas a fonte desenha certo, então ficam como estão.
+# quadrado preto (■), com o equivalente mais fiel que ela tem. O caso real:
+# a IA escreve "diferenciando‑se", "cliente‑servidor", "blue‑green" com o
+# hífen que não quebra linha (U+2011). Esta lista só cobre o que a
+# normalização do Unicode não resolve sozinha (ver ``_safe_char``, que
+# confere caractere por caractere o que a fonte desenha).
 _PDF_CHAR_REPLACEMENTS = str.maketrans(
     {
         "‐": "-",  # hífen
@@ -48,14 +49,69 @@ _PDF_CHAR_REPLACEMENTS = str.maketrans(
         "▪": "•",  # ▪ -> •
         "‣": "•",  # ‣ -> •
         "⁃": "•",  # ⁃ -> •
+        "◦": "•",  # marcador vazado das apostilas
+        "►": "•",
+        "▶": "•",
+        # Diagramas em texto (caixas desenhadas com ┌─┐ │ └─┘) de algumas
+        # resoluções de desafio: viram o desenho equivalente em ASCII.
+        "─": "-",
+        "━": "-",
+        "│": "|",
+        "┃": "|",
+        **{corner: "+" for corner in "┌┐└┘├┤┬┴┼"},
     }
 )
 
 
+@functools.lru_cache(maxsize=4096)
+def _drawable(ch: str) -> bool:
+    """A Helvetica (normal, negrito ou itálico — mesma codificação) desenha
+    ``ch``? É a mesma regra do reportlab: o caractere tem de caber na
+    codificação da Helvetica ou na de uma das fontes de substituição dela
+    (Symbol e ZapfDingbats); o que não cabe em nenhuma vira o "■" do
+    ZapfDingbats."""
+    from reportlab.pdfbase import pdfmetrics
+
+    font = pdfmetrics.getFont("Helvetica")
+    for encoding in [font.encName, *(sub.encName for sub in font.substitutionFonts)]:
+        try:
+            ch.encode(encoding)
+            return True
+        except UnicodeEncodeError:
+            continue
+    return False
+
+
+@functools.lru_cache(maxsize=4096)
+def _safe_char(ch: str) -> str:
+    """O que vai pro PDF no lugar de ``ch`` — nunca um caractere sem glifo.
+
+    Ordem: equivalente conhecido (``_PDF_CHAR_REPLACEMENTS``); o próprio
+    caractere, se a fonte tem; a forma de compatibilidade do Unicode (NFKC)
+    — é o que resolve as ligaduras "ﬁ", "ﬂ", "ﬀ", "ﬃ" que vêm do texto dos
+    PDFs das apostilas e saíam como quadrado preto, e também espaços finos,
+    letras de largura dupla etc.; a letra sem o acento que a fonte não tem
+    ("ș" -> "s"). Sem nada disso (emoji, ideograma), o caractere sai.
+    """
+    replaced = ch.translate(_PDF_CHAR_REPLACEMENTS)
+    if replaced != ch:
+        return "".join(_safe_char(c) for c in replaced)
+    if _drawable(ch):
+        return ch
+    compatible = unicodedata.normalize("NFKC", ch)
+    if compatible != ch:
+        return "".join(_safe_char(c) for c in compatible)
+    base = "".join(c for c in unicodedata.normalize("NFKD", ch) if not unicodedata.combining(c))
+    if base and base != ch and all(_drawable(c) for c in base):
+        return base
+    return ""
+
+
 def _pdf_safe(text: str) -> str:
-    # Emojis e outros símbolos fora do plano básico do Unicode também
-    # viram quadrado — não têm equivalente na fonte, então saem do PDF.
-    return "".join(ch for ch in text.translate(_PDF_CHAR_REPLACEMENTS) if ord(ch) <= 0xFFFF)
+    # NFC antes: texto extraído de PDF às vezes traz o acento separado da
+    # letra ("e" + acento combinante), que a fonte não desenha sozinho —
+    # junto vira "é", que ela tem.
+    return "".join(_safe_char(ch) for ch in unicodedata.normalize("NFC", text))
 
 
 def _escape(text: str) -> str:
@@ -136,12 +192,16 @@ class PdfReportGenerator(ReportGenerator):
             return Paragraph(_escape(text), heading_style)
 
         def with_bold(line: str) -> str:
-            # "**Método**" da IA vira negrito de verdade (antes os asteriscos
-            # apareciam no PDF) — escapando cada pedaço antes da marcação.
-            return "".join(
-                f"<b>{_escape(piece)}</b>" if bold else _escape(piece)
-                for piece, bold in split_bold(line)
-            )
+            # "**Método**" e "*Livro*" da IA viram negrito e itálico de
+            # verdade (antes os asteriscos apareciam no PDF) — escapando
+            # cada pedaço antes da marcação.
+            def mark(piece) -> str:  # noqa: ANN001 - InlinePiece
+                text = _escape(piece.text)
+                if piece.italic:
+                    text = f"<i>{text}</i>"
+                return f"<b>{text}</b>" if piece.bold else text
+
+            return "".join(mark(piece) for piece in split_inline(line))
 
         def body_paragraphs(text: str, style: ParagraphStyle = body_style) -> list[Paragraph]:
             # "### Parte 2 de 4 — ..." (análise em lotes) sai como subtítulo.

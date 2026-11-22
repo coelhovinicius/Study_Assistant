@@ -239,3 +239,64 @@ def test_com_apostila_o_bloco_de_extracoes_continua_igual() -> None:
     assert len(outline.insights) == 3
     assert outline.insights[0].content == "(não encontrado)"
     assert outline.insights[1].method_label == "encontrado diretamente na apostila"
+
+
+def test_split_inline_marca_italico_e_tira_crase_sem_mexer_em_conta() -> None:
+    from study_assistant.infrastructure.report_generators.report_content import InlinePiece, split_inline
+
+    assert split_inline("Leia *Testes automatizados* e rode `git commit` no **fim**.") == [
+        InlinePiece("Leia "),
+        InlinePiece("Testes automatizados", italic=True),
+        InlinePiece(" e rode "),
+        InlinePiece("git commit"),
+        InlinePiece(" no "),
+        InlinePiece("fim", bold=True),
+        InlinePiece("."),
+    ]
+    assert split_inline("5 * 3 * 2 e a*b*c e *args") == [InlinePiece("5 * 3 * 2 e a*b*c e *args")]
+
+
+def _outline_da_analise(texto: str) -> str:
+    session = _minimal_session(
+        analysis_result=AnalysisResult(
+            sections={"analise_e_resolucao_desafio": texto},
+            generated_by_provider="n8n",
+            generated_by_model="cascata",
+            provider_attempts=(),
+        )
+    )
+    [(_, content)] = build_report_outline(session).sections
+    return content
+
+
+def test_titulo_linha_e_tabela_em_markdown_da_ia_viram_o_formato_do_relatorio() -> None:
+    """Casos reais do PDF da aula 7: "#### Cenário e Problema", "---" solto
+    e a tabela de referências que saía como "| --- | --- |" numa linha só."""
+    texto = "\n".join(
+        [
+            "A seguir, as referências:",
+            "| Referência | Contribuição |",
+            "| --- | :---: |",
+            "| **ANICHE, Maurício.** *Testes automatizados* | Fundamenta o uso de inspeções |",
+            "| DELAMARO, Márcio | Define a inspeção colaborativa |",
+            "",
+            "---",
+            "#### Cenário e Problema",
+            "Nova aplicação apresenta falhas",
+        ]
+    )
+
+    assert _outline_da_analise(texto).split("\n") == [
+        "A seguir, as referências:",
+        "**Referência — Contribuição**",
+        "• **ANICHE, Maurício.** *Testes automatizados* — Fundamenta o uso de inspeções",
+        "• DELAMARO, Márcio — Define a inspeção colaborativa",
+        "### Cenário e Problema",
+        "Nova aplicação apresenta falhas",
+    ]
+
+
+def test_texto_sem_markdown_de_bloco_continua_igual() -> None:
+    texto = "Primeiro parágrafo com a | b no meio.\nSegundo parágrafo - com hífen."
+
+    assert _outline_da_analise(texto) == texto

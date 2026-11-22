@@ -14,12 +14,15 @@ from study_assistant.domain.entities import (
     MaterialType,
     StudySession,
 )
+from study_assistant.shared.text_cleanup import clean_display_text
 from study_assistant.shared.timezone_format import format_brasilia
 
 # Marcadores de item de lista reconhecidos ao reconstruir parágrafos (ver
 # ``_reflow_paragraphs``). "* " exige o espaço depois pra não confundir com
-# "**negrito**" que a IA às vezes usa dentro do próprio texto.
-_BULLET_PREFIXES = ("•", "- ", "* ")
+# "**negrito**" que a IA às vezes usa dentro do próprio texto. Os símbolos
+# são os marcadores que aparecem nas apostilas reais (depois da limpeza de
+# ``clean_display_text``, que troca os das fontes Symbol/Wingdings).
+_BULLET_PREFIXES = ("•", "◦", "▪", "►", "➢", "✓", "- ", "* ")
 
 # Uma linha que TERMINA com um desses caracteres é tratada como o fim de
 # uma frase/parágrafo de verdade. Uma linha que NÃO termina com nenhum
@@ -96,32 +99,118 @@ def _reflow_paragraphs(text: str) -> str:
 
     return "\n".join(paragraphs)
 
-_BOLD_PATTERN = re.compile(r"\*\*(.+?)\*\*")
+# **negrito** | *itálico* | `código`. O itálico só vale com o asterisco
+# colado no texto e fora de palavra — "5 * 3", "a*b" e "*args" sem par
+# continuam como estão.
+_INLINE_PATTERN = re.compile(
+    r"\*\*(?P<bold>.+?)\*\*"
+    r"|(?<![\w*])\*(?![\s*])(?P<italic>[^*\n]+?)(?<![\s*])\*(?![\w*])"
+    r"|`(?P<code>[^`\n]+)`"
+)
+
+
+@dataclass(frozen=True)
+class InlinePiece:
+    text: str
+    bold: bool = False
+    italic: bool = False
+
+
+def split_inline(line: str) -> list[InlinePiece]:
+    """Pedaços de uma linha com a marcação de texto do markdown da IA.
+
+    A IA marca à moda markdown (``**Método**``, ``*Título do livro*``,
+    ```git commit```): a tela mostra certo, mas o PDF e o DOCX exibiam os
+    asteriscos e as crases no meio do texto (levantado nos PDFs reais do
+    usuário: 84 itálicos e 36 crases à mostra). Os geradores usam isto pra
+    aplicar negrito e itálico de verdade; a crase só sai. Asterisco duplo
+    sem par é descartado — nunca aparece solto no documento.
+    """
+    pieces: list[InlinePiece] = []
+    last = 0
+    for match in _INLINE_PATTERN.finditer(line):
+        if match.start() > last:
+            pieces.append(InlinePiece(line[last : match.start()]))
+        if match.group("bold") is not None:
+            pieces.append(InlinePiece(match.group("bold"), bold=True))
+        elif match.group("italic") is not None:
+            pieces.append(InlinePiece(match.group("italic"), italic=True))
+        else:
+            pieces.append(InlinePiece(match.group("code")))
+        last = match.end()
+    if last < len(line):
+        pieces.append(InlinePiece(line[last:]))
+    return [
+        InlinePiece(piece.text.replace("**", ""), piece.bold, piece.italic)
+        for piece in pieces
+        if piece.text.replace("**", "")
+    ]
 
 
 def split_bold(line: str) -> list[tuple[str, bool]]:
-    """Pedaços de uma linha, marcando os que estavam em **negrito**.
-
-    A IA marca negrito à moda markdown (``**Método**``): a tela mostra
-    certo, mas o PDF e o DOCX exibiam os asteriscos no meio do texto. Os
-    geradores usam isto pra aplicar o negrito de verdade. Asterisco duplo
-    sem par é descartado — nunca aparece solto no documento.
-    """
-    pieces: list[tuple[str, bool]] = []
-    last = 0
-    for match in _BOLD_PATTERN.finditer(line):
-        if match.start() > last:
-            pieces.append((line[last : match.start()], False))
-        pieces.append((match.group(1), True))
-        last = match.end()
-    if last < len(line):
-        pieces.append((line[last:], False))
-    return [(text.replace("**", ""), bold) for text, bold in pieces if text.replace("**", "")]
+    """``split_inline`` só com o negrito: (texto, está em negrito)."""
+    return [(piece.text, piece.bold) for piece in split_inline(line)]
 
 
 def strip_bold(line: str) -> str:
-    """A linha sem as marcas de negrito (pra títulos, que já são negrito)."""
-    return "".join(text for text, _ in split_bold(line))
+    """A linha sem as marcas de negrito/itálico (pra títulos, que já são negrito)."""
+    return "".join(piece.text for piece in split_inline(line))
+
+
+_MD_HEADING = re.compile(r"^\s*#{1,6}\s+(.*?)\s*#*\s*$")
+_MD_RULE = re.compile(r"^\s*([-*_])(\s*\1){2,}\s*$")
+_MD_TABLE_SEPARATOR = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
+
+
+def _table_cells(line: str) -> list[str] | None:
+    stripped = line.strip()
+    if not (stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 3):
+        return None
+    return [cell.strip() for cell in stripped[1:-1].split("|")]
+
+
+def _normalize_markdown_blocks(text: str) -> str:
+    """Títulos, linhas horizontais e tabelas do markdown da IA, linha a linha,
+    no formato que os geradores entendem.
+
+    O prompt pede pra IA não usar títulos markdown, mas ela às vezes usa
+    (nos PDFs reais: "#### Cenário e Problema", "---" solto e uma tabela de
+    referências impressa como "| --- | --- |" com as linhas grudadas). O
+    prompt não muda — mudar o texto enviado faria as respostas guardadas
+    serem pedidas de novo à IA (ver ``ai_caller.py``) — então o ajuste é
+    aqui:
+
+    * ``#### Título`` vira subtítulo (``SECTION_SUBHEADING_PREFIX``);
+    * ``---`` / ``***`` sozinhos na linha somem (o relatório já separa as
+      seções);
+    * tabela: a linha de cabeçalho vira uma linha em negrito, a de traços
+      some, e cada linha vira um item "• célula — célula" (o item é o que
+      impede ``_reflow_paragraphs`` de grudar uma linha na outra).
+    """
+    lines = text.replace("\r\n", "\n").split("\n")
+    out: list[str] = []
+    for index, line in enumerate(lines):
+        heading = _MD_HEADING.match(line)
+        if heading:
+            out.append(f"{SECTION_SUBHEADING_PREFIX}{heading.group(1)}" if heading.group(1) else "")
+            continue
+        if _MD_RULE.match(line) or _MD_TABLE_SEPARATOR.match(line) and "|" in line:
+            out.append("")
+            continue
+        cells = _table_cells(line)
+        if cells is None:
+            out.append(line)
+            continue
+        cells = [cell for cell in cells if cell]
+        if not cells:
+            continue
+        next_line = lines[index + 1] if index + 1 < len(lines) else ""
+        if "|" in next_line and _MD_TABLE_SEPARATOR.match(next_line):
+            out.append("")
+            out.append("**" + " — ".join(strip_bold(cell) for cell in cells) + "**")
+        else:
+            out.append("• " + " — ".join(cells))
+    return "\n".join(out)
 
 
 _MATERIAL_TYPE_LABELS: dict[MaterialType, str] = {
@@ -198,7 +287,7 @@ def build_report_outline(session: StudySession) -> ReportOutline:
             insights.append(
                 InsightItem(
                     label=label,
-                    content=_reflow_paragraphs(section.content) or "(não encontrado)",
+                    content=_reflow_paragraphs(clean_display_text(section.content)) or "(não encontrado)",
                     method_label=method_label,
                 )
             )
@@ -206,7 +295,7 @@ def build_report_outline(session: StudySession) -> ReportOutline:
     sections: list[tuple[str, str]] = []
     if session.analysis_result:
         sections = [
-            (title, _reflow_paragraphs(content))
+            (title, _reflow_paragraphs(_normalize_markdown_blocks(clean_display_text(content))))
             for title, content in session.analysis_result.ordered_sections()
         ]
 

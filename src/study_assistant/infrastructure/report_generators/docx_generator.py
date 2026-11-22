@@ -9,19 +9,21 @@ from study_assistant.domain.exceptions import ReportGenerationError
 from study_assistant.domain.ports import ReportGenerator
 from study_assistant.infrastructure.report_generators.report_content import (
     build_report_outline,
-    split_bold,
+    split_inline,
     strip_bold,
 )
 
 
 def _add_body_paragraph(document, text: str, alignment) -> None:  # noqa: ANN001 - tipos do python-docx
-    # "**Método**" da IA vira negrito de verdade (antes os asteriscos
-    # apareciam no documento).
+    # "**Método**" e "*Livro*" da IA viram negrito e itálico de verdade
+    # (antes os asteriscos apareciam no documento).
     body = document.add_paragraph()
-    for piece, bold in split_bold(text):
-        run = body.add_run(piece)
-        if bold:
+    for piece in split_inline(text):
+        run = body.add_run(piece.text)
+        if piece.bold:
             run.bold = True
+        if piece.italic:
+            run.italic = True
     body.alignment = alignment
 
 

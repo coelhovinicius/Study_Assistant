@@ -197,10 +197,10 @@ def test_pdf_nao_desenha_quadrado_preto_no_lugar_de_hifen() -> None:
         provider_attempts=(),
     )
 
-    reader = PdfReader(io.BytesIO(PdfReportGenerator().generate(session)))
-    text = "\n".join(page.extract_text() for page in reader.pages)
+    pdf = PdfReportGenerator().generate(session)
+    text = "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(pdf)).pages)
 
-    assert "\u25a0" not in text  # ■
+    assert "/ZapfDingbats" not in _fontes_usadas(pdf)  # a fonte do "■"
     assert "Diferenciando-se" in text
     assert "cliente-servidor" in text
     assert "blue-green" in text
@@ -238,3 +238,97 @@ def test_docx_aplica_o_negrito_da_ia_sem_mostrar_asteriscos() -> None:
 
     assert paragraph.text == "Um Método formaliza as atividades de um Processo."
     assert [run.text for run in paragraph.runs if run.bold] == ["Método", "Processo"]
+
+
+def _fontes_usadas(pdf_bytes: bytes) -> set[str]:
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    return {
+        str(font.get_object()["/BaseFont"])
+        for page in reader.pages
+        for font in page["/Resources"]["/Font"].values()
+    }
+
+
+def test_pdf_nao_desenha_quadrado_preto_no_lugar_das_ligaduras() -> None:
+    """Regressão: o "ﬁ" (U+FB01) e as outras ligaduras vêm do texto dos PDFs
+    das apostilas — nos trechos extraídos e no que a IA copia deles. A
+    Helvetica não tem esses caracteres, e o reportlab desenhava no lugar o
+    "■" da fonte ZapfDingbats (que o pypdf lê de volta como "n", por isso o
+    teste olha as fontes usadas, não só o texto)."""
+    from pypdf import PdfReader
+
+    session = _sample_session()
+    session.apostila_insights = ApostilaInsights(
+        referencias_bibliograficas=ExtractedSection("SILVA. De\ufb01nição de \ufb02uxo.", ExtractionMethod.HEURISTICA),
+        dicas_leitura=ExtractedSection("Leia também...", ExtractionMethod.HEURISTICA),
+        desafio_pratico=ExtractedSection("Resolva o caso X", ExtractionMethod.HEURISTICA),
+    )
+    session.analysis_result = AnalysisResult(
+        sections={
+            "analise_apostila": (
+                "A con\ufb01guração do pipeline é e\ufb01ciente; o o\ufb00set é e\ufb03cient; a "
+                "solução foi validada (cafe\u0301, \u0219ir, Ａ, \u4e2d) \U0001f680 fim.\n"
+                "\uf0b7 Teste de Caixa Branca\n"
+                "\u25e6 Qualidade do software e o trade-o\u01af \ufb01nanceiro\n"
+                "\u250c\u2500\u2500\u2510 \u2502 SCM \u2502 \u2514\u2500\u2500\u2518"
+            )
+        },
+        generated_by_provider="n8n",
+        generated_by_model="cascata",
+        provider_attempts=(),
+    )
+
+    pdf = PdfReportGenerator().generate(session)
+    text = "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(pdf)).pages)
+
+    assert "/ZapfDingbats" not in _fontes_usadas(pdf)
+    assert "Definição de fluxo" in text
+    assert "configuração do pipeline é eficiente; o offset é efficient" in text
+    assert "café, sir, A" in text
+    # O pypdf lê o "•" da Helvetica de volta como "\x7f" (o código dele na
+    # codificação WinAnsi) — é o mesmo marcador da lista de materiais.
+    assert "\x7f Teste de Caixa Branca\n" in text
+    assert "\x7f Qualidade do software e o trade-off financeiro" in text
+    assert "+--+ | SCM | +--+" in text
+
+
+def test_pdf_continua_desenhando_os_simbolos_que_a_fonte_tem() -> None:
+    session = _sample_session()
+    session.analysis_result = AnalysisResult(
+        sections={"analise_apostila": "Fluxo: código → build → deploy; cobertura ≥ 80% ✓ α… “ok” – fim — x²."},
+        generated_by_provider="n8n",
+        generated_by_model="cascata",
+        provider_attempts=(),
+    )
+    from pypdf import PdfReader
+
+    pdf = PdfReportGenerator().generate(session)
+    text = "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(pdf)).pages)
+
+    assert "cobertura" in text and "80%" in text and "x²" in text
+
+
+def test_pdf_e_docx_aplicam_o_italico_da_ia_sem_mostrar_asteriscos_nem_crases() -> None:
+    from pypdf import PdfReader
+
+    session = _sample_session()
+    session.analysis_result = AnalysisResult(
+        sections={"analise_apostila": "Leia *Testes automatizados de software* e rode `git commit`."},
+        generated_by_provider="n8n",
+        generated_by_model="cascata",
+        provider_attempts=(),
+    )
+
+    pdf = PdfReportGenerator().generate(session)
+    text = "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(pdf)).pages)
+    assert "Leia Testes automatizados de software e rode git commit." in text
+    assert "/Helvetica-Oblique" in _fontes_usadas(pdf)
+
+    import docx
+
+    document = docx.Document(io.BytesIO(DocxReportGenerator().generate(session)))
+    [paragraph] = [p for p in document.paragraphs if p.text.startswith("Leia Testes")]
+    assert paragraph.text == "Leia Testes automatizados de software e rode git commit."
+    assert [run.text for run in paragraph.runs if run.italic] == ["Testes automatizados de software"]
