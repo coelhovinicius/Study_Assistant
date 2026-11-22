@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import functools
 import io
+import logging
 import unicodedata
+from pathlib import Path
 
 from study_assistant.domain.entities import SECTION_SUBHEADING_PREFIX, StudySession
 from study_assistant.domain.exceptions import ReportGenerationError
@@ -30,30 +32,73 @@ _GOLD_HEX = "#c9a24d"
 _GOLD_LIGHT_HEX = "#e6bf73"
 _MUTED_HEX = "#5a5a5a"
 
+logger = logging.getLogger(__name__)
 
-# Caracteres que a Helvetica do reportlab NÃO tem e desenha como um
-# quadrado preto (■), com o equivalente mais fiel que ela tem. O caso real:
-# a IA escreve "diferenciando‑se", "cliente‑servidor", "blue‑green" com o
-# hífen que não quebra linha (U+2011). Esta lista só cobre o que a
-# normalização do Unicode não resolve sozinha (ver ``_safe_char``, que
-# confere caractere por caractere o que a fonte desenha).
+# Fonte do PDF: DejaVu Sans Condensed, embutida no arquivo (só os
+# caracteres usados). Antes era a Helvetica das 14 fontes padrão do PDF,
+# que só cobre o alfabeto latino básico: tudo o que ficava de fora (o "ﬁ"
+# do texto das apostilas, o hífen U+2011 da IA, marcadores do Word, caixas
+# ┌─┐) saía como um quadrado preto, e cada caso pedia um remendo. A DejaVu
+# cobre latim completo, grego, cirílico, setas, símbolos matemáticos, "✓"
+# e caixas de desenho. A versão condensada tem largura próxima da
+# Helvetica, então o relatório mantém o tamanho e a cara de antes. Licença
+# livre (Bitstream Vera + domínio público): ``fonts/LICENSE-DejaVu.txt``.
+_FONT_DIR = Path(__file__).resolve().parent / "fonts"
+_FONT_FILES = {
+    "normal": "DejaVuSansCondensed.ttf",
+    "bold": "DejaVuSansCondensed-Bold.ttf",
+    "italic": "DejaVuSansCondensed-Oblique.ttf",
+    "boldItalic": "DejaVuSansCondensed-BoldOblique.ttf",
+}
+_FAMILY = "StudySans"
+_FAMILY_NAMES = {
+    "normal": _FAMILY,
+    "bold": f"{_FAMILY}-Bold",
+    "italic": f"{_FAMILY}-Oblique",
+    "boldItalic": f"{_FAMILY}-BoldOblique",
+}
+# Sem os arquivos da fonte (ex: pasta faltando num deploy), o PDF continua
+# saindo — com a Helvetica e a mesma proteção contra caracteres sem glifo.
+_FALLBACK_NAMES = {
+    "normal": "Helvetica",
+    "bold": "Helvetica-Bold",
+    "italic": "Helvetica-Oblique",
+    "boldItalic": "Helvetica-BoldOblique",
+}
+
+
+@functools.lru_cache(maxsize=1)
+def _fonts() -> dict[str, str]:
+    """Registra a família da fonte no reportlab (uma vez por processo) e
+    devolve o nome de cada variação: normal, bold, italic, boldItalic."""
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    try:
+        for variant, filename in _FONT_FILES.items():
+            pdfmetrics.registerFont(TTFont(_FAMILY_NAMES[variant], str(_FONT_DIR / filename)))
+    except Exception as exc:  # noqa: BLE001 - qualquer falha ao ler a fonte cai na Helvetica
+        logger.warning("Fonte do PDF indisponível (%s); usando Helvetica.", exc)
+        return dict(_FALLBACK_NAMES)
+    pdfmetrics.registerFontFamily(_FAMILY, **_FAMILY_NAMES)
+    return dict(_FAMILY_NAMES)
+
+
+# Equivalentes para o que a fonte não tiver. Com a DejaVu quase nada cai
+# aqui; com a Helvetica de reserva, é o que evita os quadrados. Só entram
+# depois de conferir que a fonte não desenha o caractere original.
 _PDF_CHAR_REPLACEMENTS = str.maketrans(
     {
-        "‐": "-",  # hífen
-        "‑": "-",  # hífen que não quebra linha
         "‒": "–",  # traço de algarismo -> meia-risca
         "―": "—",  # barra horizontal -> travessão
-        "​": "",  # espaço de largura zero
-        "⁠": "",  # "word joiner"
-        "﻿": "",  # BOM / espaço de largura zero sem quebra
         "▪": "•",  # ▪ -> •
         "‣": "•",  # ‣ -> •
         "⁃": "•",  # ⁃ -> •
         "◦": "•",  # marcador vazado das apostilas
         "►": "•",
         "▶": "•",
-        # Diagramas em texto (caixas desenhadas com ┌─┐ │ └─┘) de algumas
-        # resoluções de desafio: viram o desenho equivalente em ASCII.
+        # Diagramas em texto (caixas desenhadas com ┌─┐ │ └─┘): o desenho
+        # equivalente em ASCII.
         "─": "-",
         "━": "-",
         "│": "|",
@@ -63,41 +108,68 @@ _PDF_CHAR_REPLACEMENTS = str.maketrans(
 )
 
 
-@functools.lru_cache(maxsize=4096)
+def _encodes(ch: str, encoding: str) -> bool:
+    try:
+        ch.encode(encoding)
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+@functools.lru_cache(maxsize=8192)
 def _drawable(ch: str) -> bool:
-    """A Helvetica (normal, negrito ou itálico — mesma codificação) desenha
-    ``ch``? É a mesma regra do reportlab: o caractere tem de caber na
-    codificação da Helvetica ou na de uma das fontes de substituição dela
-    (Symbol e ZapfDingbats); o que não cabe em nenhuma vira o "■" do
-    ZapfDingbats."""
+    """As quatro variações da fonte (normal, negrito, itálico e negrito-
+    itálico) desenham ``ch``? Fonte TrueType: o caractere tem de estar na
+    tabela de caracteres de cada uma. Helvetica de reserva: a regra do
+    reportlab, caber na codificação dela ou na de uma das fontes de
+    substituição (Symbol e ZapfDingbats); o que não cabe vira "■"."""
     from reportlab.pdfbase import pdfmetrics
 
-    font = pdfmetrics.getFont("Helvetica")
-    for encoding in [font.encName, *(sub.encName for sub in font.substitutionFonts)]:
-        try:
-            ch.encode(encoding)
-            return True
-        except UnicodeEncodeError:
-            continue
-    return False
+    for name in _fonts().values():
+        font = pdfmetrics.getFont(name)
+        char_to_glyph = getattr(font.face, "charToGlyph", None)
+        if char_to_glyph is not None:
+            if ord(ch) not in char_to_glyph:
+                return False
+        elif not any(
+            _encodes(ch, encoding)
+            for encoding in [font.encName, *(sub.encName for sub in font.substitutionFonts)]
+        ):
+            return False
+    return True
 
 
-@functools.lru_cache(maxsize=4096)
+# Trocados mesmo quando a fonte os tem, pra o texto do PDF continuar
+# pesquisável e copiável: quem procura "definição" ou "cliente-servidor"
+# não acha "deﬁnição" (ligadura) nem "cliente‑servidor" (hífen U+2011).
+_ALWAYS_REPLACED = {
+    **{code: unicodedata.normalize("NFKC", chr(code)) for code in range(0xFB00, 0xFB07)},
+    0x2010: "-",  # hífen
+    0x2011: "-",  # hífen que não quebra linha
+    0x200B: "",  # espaço de largura zero
+    0x2060: "",  # "word joiner"
+    0xFEFF: "",  # BOM / espaço de largura zero sem quebra
+}
+
+
+@functools.lru_cache(maxsize=8192)
 def _safe_char(ch: str) -> str:
-    """O que vai pro PDF no lugar de ``ch`` — nunca um caractere sem glifo.
+    """O que vai pro PDF no lugar de ``ch``: nunca um caractere sem glifo.
 
-    Ordem: equivalente conhecido (``_PDF_CHAR_REPLACEMENTS``); o próprio
-    caractere, se a fonte tem; a forma de compatibilidade do Unicode (NFKC)
-    — é o que resolve as ligaduras "ﬁ", "ﬂ", "ﬀ", "ﬃ" que vêm do texto dos
-    PDFs das apostilas e saíam como quadrado preto, e também espaços finos,
-    letras de largura dupla etc.; a letra sem o acento que a fonte não tem
-    ("ș" -> "s"). Sem nada disso (emoji, ideograma), o caractere sai.
+    Ligaduras, hífens especiais e caracteres invisíveis são sempre trocados
+    (``_ALWAYS_REPLACED``). Para o resto, nesta ordem: o próprio caractere,
+    se a fonte tem; um equivalente conhecido (``_PDF_CHAR_REPLACEMENTS``);
+    a forma de compatibilidade do Unicode (NFKC: espaços finos, letras de
+    largura dupla etc.); a letra sem o acento que a fonte não tem. Sem
+    nada disso (emoji, ideograma), o caractere sai.
     """
+    if ord(ch) in _ALWAYS_REPLACED:
+        return "".join(_safe_char(c) for c in _ALWAYS_REPLACED[ord(ch)])
+    if _drawable(ch):
+        return ch
     replaced = ch.translate(_PDF_CHAR_REPLACEMENTS)
     if replaced != ch:
         return "".join(_safe_char(c) for c in replaced)
-    if _drawable(ch):
-        return ch
     compatible = unicodedata.normalize("NFKC", ch)
     if compatible != ch:
         return "".join(_safe_char(c) for c in compatible)
@@ -109,8 +181,7 @@ def _safe_char(ch: str) -> str:
 
 def _pdf_safe(text: str) -> str:
     # NFC antes: texto extraído de PDF às vezes traz o acento separado da
-    # letra ("e" + acento combinante), que a fonte não desenha sozinho —
-    # junto vira "é", que ela tem.
+    # letra ("e" + acento combinante); junto vira "é", um caractere só.
     return "".join(_safe_char(ch) for ch in unicodedata.normalize("NFC", text))
 
 
@@ -157,26 +228,29 @@ class PdfReportGenerator(ReportGenerator):
         gold_light = colors.HexColor(_GOLD_LIGHT_HEX)
         muted = colors.HexColor(_MUTED_HEX)
 
+        fonts = _fonts()
         base = getSampleStyleSheet()
         title_style = ParagraphStyle(
             "SATitle", parent=base["Title"], textColor=navy, spaceAfter=2,
+            fontName=fonts["bold"],
         )
         meta_style = ParagraphStyle(
             "SAMeta", parent=base["Normal"], textColor=muted, fontSize=9,
-            fontName="Helvetica-Oblique",
+            fontName=fonts["italic"],
         )
         heading_style = ParagraphStyle(
             "SAHeading", parent=base["Heading1"], textColor=gold_light,
             backColor=navy, fontSize=13, leading=17, spaceBefore=2,
             spaceAfter=8, borderPadding=7, borderRadius=4,
+            fontName=fonts["bold"],
         )
         subheading_style = ParagraphStyle(
             "SASubheading", parent=base["Heading2"], textColor=navy,
-            fontSize=11, spaceBefore=4, spaceAfter=2,
+            fontSize=11, spaceBefore=4, spaceAfter=2, fontName=fonts["bold"],
         )
         body_style = ParagraphStyle(
             "SABody", parent=base["Normal"], alignment=TA_JUSTIFY,
-            fontSize=10.2, leading=14.5, spaceAfter=5,
+            fontSize=10.2, leading=14.5, spaceAfter=5, fontName=fonts["normal"],
         )
         method_style = ParagraphStyle(
             "SAMethod", parent=meta_style, spaceAfter=3,
@@ -193,7 +267,7 @@ class PdfReportGenerator(ReportGenerator):
 
         def with_bold(line: str) -> str:
             # "**Método**" e "*Livro*" da IA viram negrito e itálico de
-            # verdade (antes os asteriscos apareciam no PDF) — escapando
+            # verdade (antes os asteriscos apareciam no PDF), escapando
             # cada pedaço antes da marcação.
             def mark(piece) -> str:  # noqa: ANN001 - InlinePiece
                 text = _escape(piece.text)
@@ -229,6 +303,7 @@ class PdfReportGenerator(ReportGenerator):
                         for m in outline.materials
                     ],
                     bulletType="bullet",
+                    bulletFontName=fonts["normal"],
                 )
             )
             story.append(hr())
@@ -277,7 +352,7 @@ def _draw_page_chrome(canvas, doc) -> None:  # noqa: ANN001 - assinatura exigida
     canvas.setFillColor(colors.HexColor(_GOLD_HEX))
     canvas.rect(0, height - 1.15 * cm, width, 0.06 * cm, fill=1, stroke=0)
 
-    canvas.setFont("Helvetica", 8)
+    canvas.setFont(_fonts()["normal"], 8)
     canvas.setFillColor(colors.HexColor(_MUTED_HEX))
     canvas.drawRightString(width - 2 * cm, 1.2 * cm, f"Página {doc.page}")
 

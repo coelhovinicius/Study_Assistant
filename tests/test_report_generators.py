@@ -227,7 +227,7 @@ def test_pdf_aplica_o_negrito_da_ia_sem_mostrar_asteriscos() -> None:
 
     assert "**" not in text
     assert "Um Método formaliza as atividades de um Processo." in " ".join(text.split())
-    assert "/Helvetica-Bold" in fonts
+    assert "/AAAAAA+DejaVuSansCondensed-Bold" in fonts
 
 
 def test_docx_aplica_o_negrito_da_ia_sem_mostrar_asteriscos() -> None:
@@ -253,10 +253,11 @@ def _fontes_usadas(pdf_bytes: bytes) -> set[str]:
 
 def test_pdf_nao_desenha_quadrado_preto_no_lugar_das_ligaduras() -> None:
     """Regressão: o "ﬁ" (U+FB01) e as outras ligaduras vêm do texto dos PDFs
-    das apostilas — nos trechos extraídos e no que a IA copia deles. A
-    Helvetica não tem esses caracteres, e o reportlab desenhava no lugar o
-    "■" da fonte ZapfDingbats (que o pypdf lê de volta como "n", por isso o
-    teste olha as fontes usadas, não só o texto)."""
+    das apostilas — nos trechos extraídos e no que a IA copia deles. Com a
+    Helvetica, o reportlab desenhava no lugar o "■" da fonte ZapfDingbats
+    (que o pypdf lê de volta como "n", por isso o teste olha as fontes
+    usadas, não só o texto). Ligadura vira letras mesmo com a DejaVu, que a
+    tem: o texto do PDF fica pesquisável."""
     from pypdf import PdfReader
 
     session = _sample_session()
@@ -286,12 +287,10 @@ def test_pdf_nao_desenha_quadrado_preto_no_lugar_das_ligaduras() -> None:
     assert "/ZapfDingbats" not in _fontes_usadas(pdf)
     assert "Definição de fluxo" in text
     assert "configuração do pipeline é eficiente; o offset é efficient" in text
-    assert "café, sir, A" in text
-    # O pypdf lê o "•" da Helvetica de volta como "\x7f" (o código dele na
-    # codificação WinAnsi) — é o mesmo marcador da lista de materiais.
-    assert "\x7f Teste de Caixa Branca\n" in text
-    assert "\x7f Qualidade do software e o trade-off financeiro" in text
-    assert "+--+ | SCM | +--+" in text
+    assert "café, șir, A, ) fim." in text  # "ș" a DejaVu tem; ideograma e emoji saem
+    assert "• Teste de Caixa Branca\n" in text
+    assert "◦ Qualidade do software e o trade-off financeiro" in text
+    assert "┌──┐ │ SCM │ └──┘" in text
 
 
 def test_pdf_continua_desenhando_os_simbolos_que_a_fonte_tem() -> None:
@@ -307,7 +306,63 @@ def test_pdf_continua_desenhando_os_simbolos_que_a_fonte_tem() -> None:
     pdf = PdfReportGenerator().generate(session)
     text = "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(pdf)).pages)
 
-    assert "cobertura" in text and "80%" in text and "x²" in text
+    assert "código → build → deploy; cobertura ≥ 80% ✓ α… “ok” – fim — x²." in text
+    assert _texto_fora_da_fonte_embutida(pdf) == set()
+
+
+def _texto_fora_da_fonte_embutida(pdf_bytes: bytes) -> set[str]:
+    """Trechos visíveis desenhados com outra fonte que não a DejaVu
+    embutida (o canvas do reportlab declara a Helvetica, mas só com texto
+    vazio)."""
+    from pypdf import PdfReader
+
+    found: set[str] = set()
+    for page in PdfReader(io.BytesIO(pdf_bytes)).pages:
+        def visit(text, cm, tm, font, size, found=found) -> None:  # noqa: ANN001
+            if text.strip() and font is not None and "DejaVu" not in str(font.get("/BaseFont")):
+                found.add(text)
+
+        page.extract_text(visitor_text=visit)
+    return found
+
+
+def test_pdf_desenha_todo_o_texto_com_a_fonte_embutida() -> None:
+    pdf = PdfReportGenerator().generate(_session_with_bold())
+
+    assert _texto_fora_da_fonte_embutida(pdf) == set()
+    assert {"/AAAAAA+DejaVuSansCondensed", "/AAAAAA+DejaVuSansCondensed-Bold"} <= _fontes_usadas(pdf)
+
+
+def test_pdf_sem_os_arquivos_da_fonte_cai_na_helvetica_sem_quadrados(monkeypatch, tmp_path) -> None:
+    """Pasta de fontes faltando (ex: deploy incompleto): o PDF continua
+    saindo, com a Helvetica, e o que ela não tem não vira "■"."""
+    from pypdf import PdfReader
+
+    from study_assistant.infrastructure.report_generators import pdf_generator
+
+    def clear_caches() -> None:
+        for cached in (pdf_generator._fonts, pdf_generator._drawable, pdf_generator._safe_char):
+            cached.cache_clear()
+
+    monkeypatch.setattr(pdf_generator, "_FONT_DIR", tmp_path / "sem_fontes")
+    clear_caches()
+    try:
+        session = _sample_session()
+        session.analysis_result = AnalysisResult(
+            sections={"analise_apostila": "A deﬁnição do ﬂuxo ┌─┐ eș \U0001f680 fim."},
+            generated_by_provider="n8n",
+            generated_by_model="cascata",
+            provider_attempts=(),
+        )
+        pdf = PdfReportGenerator().generate(session)
+    finally:
+        monkeypatch.undo()
+        clear_caches()
+
+    text = "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(pdf)).pages)
+    assert "/Helvetica" in _fontes_usadas(pdf)
+    assert "/ZapfDingbats" not in _fontes_usadas(pdf)
+    assert "A definição do fluxo +-+ es fim." in text
 
 
 def test_pdf_e_docx_aplicam_o_italico_da_ia_sem_mostrar_asteriscos_nem_crases() -> None:
@@ -324,7 +379,7 @@ def test_pdf_e_docx_aplicam_o_italico_da_ia_sem_mostrar_asteriscos_nem_crases() 
     pdf = PdfReportGenerator().generate(session)
     text = "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(pdf)).pages)
     assert "Leia Testes automatizados de software e rode git commit." in text
-    assert "/Helvetica-Oblique" in _fontes_usadas(pdf)
+    assert "/AAAAAA+DejaVuSansCondensed-Oblique" in _fontes_usadas(pdf)
 
     import docx
 
